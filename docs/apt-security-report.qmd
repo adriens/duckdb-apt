@@ -1,0 +1,885 @@
+---
+title: "Installed Software Security Report"
+subtitle: "Auditing apt packages with SQL and the DuckDB apt extension"
+author:
+  - name: "Adrien SALES"
+    affiliation: "Open Source Community"
+    url: "https://x.com/rastadidi"
+date: today
+abstract: |
+  This report audits the software installed with apt on a Debian-based machine: what is installed, which repositories it comes from and how they are trusted, which packages no longer receive updates, which security updates are pending, and which packages concentrate dependency risk. Every figure comes from SQL queries run with the DuckDB apt extension on the local dpkg and apt files, so the report can be regenerated at any time and the queries reused for continuous monitoring. Source code available at: https://github.com/adriens/duckdb-apt
+keywords: [DuckDB, apt, dpkg, Debian, Ubuntu, SQL, Security, Supply Chain, Patch Management]
+format:
+  pdf:
+    toc: true
+    toc-title: "Table of Contents"
+    number-sections: true
+    colorlinks: true
+    code-block-bg: true
+    code-block-border-left: "#FFCD00"
+    documentclass: article
+    pdf-engine: xelatex
+    geometry: margin=1in
+    fontsize: 11pt
+    include-in-header:
+      text: |
+        \usepackage{titling}
+        \usepackage{fontawesome5}
+        \usepackage{marginnote}
+        \usepackage{tikz}
+        \usepackage{eso-pic}
+        \usepackage{etoolbox}
+        \usepackage{fancyhdr}
+        \pagestyle{fancy}
+        \fancyhf{}
+        \renewcommand{\headrulewidth}{0pt}
+        \renewcommand{\footrulewidth}{0pt}
+        \fancyhead[L]{\small\textcolor{gray}{\faIcon{shield-alt}~Installed Software Security Report}}
+        \fancyhead[R]{\small\textcolor{gray}{\faIcon{github}~adriens/duckdb-apt}}
+        \fancyfoot[C]{%
+          \begin{tikzpicture}[overlay]
+            \draw[color=duckdbyellow, line width=1pt] (-7,0.3) -- (7,0.3);
+          \end{tikzpicture}%
+          \small\textcolor{gray}{\thepage}%
+        }
+        \AtBeginEnvironment{abstract}{\vspace{1cm}\color{white}}
+        \AtEndEnvironment{abstract}{\vfill}
+        \definecolor{duckdbblue}{HTML}{31BAE9}
+        \definecolor{duckdbyellow}{HTML}{FFCD00}
+        \definecolor{sevcritical}{HTML}{D03B3B}
+        \definecolor{sevhigh}{HTML}{EC835A}
+        \definecolor{sevmedium}{HTML}{FAB219}
+        \definecolor{sevlow}{HTML}{9B9A95}
+        \definecolor{sevok}{HTML}{0CA30C}
+        \AddToShipoutPictureBG{%
+          \begin{tikzpicture}[remember picture, overlay]
+            \fill[black]
+              (current page.south west) rectangle (current page.north east);
+            \fill[white]
+              ([xshift=11pt,  yshift=-11pt] current page.north west)
+              rectangle
+              ([xshift=-11pt, yshift=11pt]  current page.south east);
+            \draw[line width=4pt, color=duckdbyellow]
+              ([xshift=11pt,  yshift=-11pt] current page.north west)
+              rectangle
+              ([xshift=-11pt, yshift=11pt]  current page.south east);
+          \end{tikzpicture}%
+        }
+        \pretitle{%
+          \AddToShipoutPictureBG*{%
+            \begin{tikzpicture}[remember picture, overlay]
+              \fill[black]
+                (current page.south west) rectangle (current page.north east);
+              \draw[line width=4pt, color=duckdbyellow]
+                ([xshift=11pt, yshift=-11pt] current page.north west)
+                rectangle
+                ([xshift=-11pt, yshift=11pt] current page.south east);
+            \end{tikzpicture}%
+          }%
+          \thispagestyle{empty}%
+          \begin{center}%
+          \vspace*{1.5cm}%
+          {\fontsize{72}{72}\selectfont\textcolor{duckdbyellow}{\faIcon{shield-alt}}}\\[1cm]%
+          \LARGE\bfseries\color{duckdbyellow}}
+        \posttitle{\par\end{center}\vskip 0.8em}
+        \preauthor{\begin{center}\large\color{white}}
+        \postauthor{\\\small\textcolor{duckdbblue}{\faIcon{twitter}}~\href{https://x.com/rastadidi}{\textcolor{duckdbblue}{x.com/rastadidi}}\\\small\textcolor{white}{\faIcon{github}}~\href{https://github.com/adriens/duckdb-apt}{\textcolor{white}{adriens/duckdb-apt}}\end{center}}
+        \predate{\begin{center}\large\color{gray}}
+        \postdate{\par\end{center}}
+        \pretocmd{\tableofcontents}{\clearpage}{}{}
+jupyter: python3
+---
+
+\newpage
+
+```{python}
+#| echo: false
+#| output: false
+
+import glob
+import json
+import os
+import platform
+import socket
+import subprocess
+from datetime import datetime
+
+import matplotlib.pyplot as plt
+import networkx as nx
+import pandas as pd
+from IPython.display import Markdown, display
+
+# A local build of this repository is used when present (or set DUCKDB / APT_EXTENSION), otherwise the
+# community extension is installed into the duckdb found on the PATH
+LOCAL_BUILD = "../build/release/extension/apt/apt.duckdb_extension"
+APT_EXTENSION = os.environ.get("APT_EXTENSION", LOCAL_BUILD if os.path.exists(LOCAL_BUILD) else "")
+DUCKDB = os.environ.get("DUCKDB", "../build/release/duckdb" if APT_EXTENSION == LOCAL_BUILD else "duckdb")
+LOAD_APT = f"LOAD '{APT_EXTENSION}';" if APT_EXTENSION else "INSTALL apt FROM community; LOAD apt;"
+# Audit another system (mounted disk image, container filesystem) instead of this machine
+APT_ROOT = os.environ.get("APT_ROOT", "").rstrip("/")
+ROOT = f"root := '{APT_ROOT}'" if APT_ROOT else ""
+
+
+def query_apt(sql):
+    # AI_AGENT switches the DuckDB CLI to its agent output mode, which is not JSON
+    env = {key: value for key, value in os.environ.items() if key != "AI_AGENT"}
+    result = subprocess.run(
+        [DUCKDB, "-unsigned", "-json", ":memory:", "-c", f"{LOAD_APT} {sql}"],
+        capture_output=True, text=True, env=env,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"Query failed: {result.stderr}\n{sql}")
+    output = result.stdout.strip()
+    return pd.DataFrame(json.loads(output)) if output else pd.DataFrame()
+
+
+def show(df, empty="*None.*"):
+    display(Markdown(df.to_markdown(index=False) if len(df) else empty))
+
+
+# Chart style: one hue for single-series charts, recessive axes, text in ink colors
+BLUE = "#2a78d6"
+NEUTRAL = "#b7b6b1"
+INK = "#0b0b0b"
+MUTED = "#52514e"
+SEVERITY_COLORS = {"Critical": "#d03b3b", "High": "#ec835a", "Medium": "#fab219", "Low": "#9b9a95"}
+SEVERITY_ICONS = {"Critical": "times-circle", "High": "exclamation-circle", "Medium": "exclamation-triangle", "Low": "info-circle"}
+SEVERITY_ORDER = list(SEVERITY_COLORS)
+
+plt.rcParams.update({
+    "font.size": 10,
+    "axes.edgecolor": NEUTRAL,
+    "axes.labelcolor": MUTED,
+    "axes.titlecolor": INK,
+    "axes.titleweight": "bold",
+    "axes.titlesize": 12,
+    "axes.spines.top": False,
+    "axes.spines.right": False,
+    "xtick.color": MUTED,
+    "ytick.color": INK,
+})
+
+
+def hbar(labels, values, title, xlabel, colors=BLUE, fmt="{:,.0f}", height=None):
+    fig, ax = plt.subplots(figsize=(8, height or max(2.5, 0.35 * len(labels) + 1)))
+    ax.barh(labels, values, color=colors, height=0.6)
+    ax.invert_yaxis()
+    ax.grid(axis="x", color="#e4e3df", linewidth=0.8)
+    ax.set_axisbelow(True)
+    ax.spines["left"].set_visible(False)
+    ax.tick_params(axis="y", length=0)
+    for i, value in enumerate(values):
+        ax.text(value, i, " " + fmt.format(value), va="center", color=INK, fontsize=9)
+    ax.set_xlim(0, max(values) * 1.15 if len(values) else 1)
+    ax.set_title(title, loc="left", pad=12)
+    ax.set_xlabel(xlabel)
+    plt.tight_layout()
+    plt.show()
+
+
+def print_table(df, widths):
+    # Pandoc sizes pipe-table columns by their share of dashes in the separator line, once a line is wider than 72
+    # characters: the dashes below always are, so the widths are under control and long cells wrap within them
+    # Identifiers such as "ubuntu-esm-infra.sources" must not be split at their hyphens
+    print("```{=latex}\n\\begingroup\\footnotesize\\renewcommand{\\arraystretch}{1.4}"
+          "\\hyphenpenalty=10000\\exhyphenpenalty=10000\n```\n")
+    print("| " + " | ".join(df.columns) + " |")
+    print("|" + "|".join("-" * width for width in widths) + "|")
+    for row in df.itertuples(index=False):
+        print("| " + " | ".join(str(value) for value in row) + " |")
+    print("\n```{=latex}\n\\endgroup\n```\n")
+
+
+def repository_uri(uri):
+    # The scheme is dropped, plain HTTP is flagged by an open lock; \nolinkurl breaks long URIs at "/" and "."
+    insecure = " \\textcolor{sevhigh}{\\faIcon{lock-open}}" if uri.startswith("http://") else ""
+    return f"\\nolinkurl{{{uri.split('://', 1)[-1].rstrip('/')}}}{insecure}"
+
+
+def severity(level):
+    color = "sev" + level.lower()
+    return f"\\textcolor{{{color}}}{{\\faIcon{{{SEVERITY_ICONS[level]}}}}} {level}"
+```
+
+```{python}
+#| echo: false
+#| output: false
+
+# Data shared by all sections
+packages = query_apt(f"SELECT * FROM apt_packages({ROOT})")
+if packages.empty:
+    raise RuntimeError("No installed package found: is this a Debian-based system (or is APT_ROOT correct)?")
+
+sources = query_apt(f"""
+    SELECT regexp_extract(file, '[^/]+$') AS file, enabled, type, uri, suite, components, signed_by, trusted
+    FROM apt_sources({ROOT})
+    ORDER BY file, suite, type
+""")
+enabled_sources = sources[sources["enabled"]] if len(sources) else sources
+
+orphans = query_apt(f"""
+    SELECT p.name, p.version, regexp_replace(p.maintainer, '\\s*<.*>', '') AS vendor,
+           round(p.installed_size_kb / 1024.0, 1) AS size_mb
+    FROM apt_packages({ROOT}) p
+    ANTI JOIN apt_package_origins({ROOT}) o USING (name, architecture)
+    ORDER BY size_mb DESC
+""")
+
+not_in_repo = query_apt(f"""
+    SELECT p.name, p.version AS installed_version,
+           string_agg(DISTINCT o.available_version, ', ') AS available_versions
+    FROM apt_packages({ROOT}) p
+    JOIN apt_package_origins({ROOT}) o USING (name, architecture)
+    GROUP BY ALL
+    HAVING NOT bool_or(o.is_installed_version)
+    ORDER BY p.name
+""")
+
+repositories = query_apt(f"""
+    SELECT coalesce(label, origin, site) AS repository, coalesce(suite, '') AS suite,
+           coalesce(component, '') AS component, count(DISTINCT name) AS packages
+    FROM apt_package_origins({ROOT})
+    WHERE is_installed_version
+    GROUP BY ALL
+    ORDER BY packages DESC
+""")
+
+universe = query_apt(f"""
+    SELECT count(DISTINCT name) AS packages
+    FROM apt_package_origins({ROOT})
+    WHERE is_installed_version AND origin = 'Ubuntu' AND component = 'universe'
+""")["packages"][0]
+esm_apps = bool(len(enabled_sources)) and enabled_sources["uri"].str.contains("esm.ubuntu.com/apps").any()
+
+# apt_upgradable() asks the local apt, so it does not apply to another root
+upgradable = query_apt("SELECT * FROM apt_upgradable() ORDER BY name") if not APT_ROOT else pd.DataFrame()
+if len(upgradable):
+    security_upgrades = upgradable[upgradable["repository"].str.contains("-security")]
+else:
+    upgradable = security_upgrades = pd.DataFrame(columns=["name", "repository", "current_version", "new_version", "architecture"])
+
+release_files = glob.glob(f"{APT_ROOT}/var/lib/apt/lists/*Release")
+last_update = datetime.fromtimestamp(max(os.path.getmtime(f) for f in release_files)) if release_files else None
+days_since_update = (datetime.now() - last_update).days if last_update else None
+
+# Third-party: installed on purpose, and not published by Ubuntu or Debian (in any version)
+third_party = query_apt(f"""
+    SELECT p.name, p.version, regexp_replace(p.maintainer, '\\s*<.*>', '') AS vendor
+    FROM apt_packages({ROOT}) p
+    WHERE NOT p.auto_installed
+      AND NOT EXISTS (
+          SELECT 1 FROM apt_package_origins({ROOT}) o
+          WHERE o.name = p.name AND o.architecture = p.architecture
+            AND (o.origin ILIKE '%ubuntu%' OR o.origin ILIKE '%debian%')
+      )
+    ORDER BY p.name
+""")
+
+# Findings: (severity, finding, count, recommendation)
+trusted_sources = enabled_sources[enabled_sources["trusted"]] if len(sources) else sources
+unpinned_sources = enabled_sources[enabled_sources["signed_by"].isna()] if len(sources) else sources
+http_sources = enabled_sources[enabled_sources["uri"].str.startswith("http://")] if len(sources) else sources
+disabled_sources = sources[~sources["enabled"]] if len(sources) else sources
+other_upgrades = len(upgradable) - len(security_upgrades)
+
+findings = []
+if len(trusted_sources):
+    findings.append(("Critical", "Repositories with signature checks disabled (trusted=yes)", len(trusted_sources),
+                     "Remove trusted=yes and pin the repository key with signed-by"))
+if len(orphans):
+    findings.append(("High", "Packages no configured repository provides: apt never updates them", len(orphans),
+                     "Re-enable or add the vendor repository, switch to a maintained channel, or uninstall"))
+if len(security_upgrades):
+    findings.append(("High", "Security updates pending", len(security_upgrades),
+                     "Apply them (apt upgrade) and check that unattended-upgrades is active"))
+if days_since_update is not None and days_since_update > 7:
+    findings.append(("High", f"Package lists not refreshed for {days_since_update} days", 1,
+                     "Run apt update regularly: every other finding depends on fresh lists"))
+if len(unpinned_sources):
+    findings.append(("Medium", "Repositories accepting any key of the global keyring (no signed-by)", len(unpinned_sources),
+                     "Add signed-by= pointing to the vendor key only"))
+if len(not_in_repo):
+    findings.append(("Medium", "Installed versions that no repository provides", len(not_in_repo),
+                     "Reinstall the repository version or document the local build"))
+if other_upgrades > 0:
+    findings.append(("Low", "Non-security updates pending", other_upgrades, "Apply during the next maintenance window"))
+if len(http_sources):
+    findings.append(("Low", "Repositories fetched over plain HTTP", len(http_sources),
+                     "Signatures protect integrity, but HTTP exposes the software inventory: prefer HTTPS mirrors"))
+if len(disabled_sources):
+    findings.append(("Low", "Disabled repositories (their packages no longer get updates)", len(disabled_sources),
+                     "Remove them, or re-enable them if their packages are still installed"))
+if universe and not esm_apps:
+    findings.append(("Low", "Packages from Ubuntu universe (community maintained)", int(universe),
+                     "Enable Ubuntu Pro ESM Apps for security coverage of universe"))
+
+findings = pd.DataFrame(findings, columns=["Severity", "Finding", "Count", "Recommendation"])
+findings["rank"] = findings["Severity"].map(SEVERITY_ORDER.index)
+findings = findings.sort_values(["rank", "Count"], ascending=[True, False]).drop(columns="rank")
+```
+
+# \faIcon{clipboard-list} Executive Summary
+
+```{python}
+#| echo: false
+#| output: asis
+
+os_release = {}
+os_release_path = f"{APT_ROOT}/etc/os-release"
+if os.path.exists(os_release_path):
+    with open(os_release_path) as f:
+        os_release = dict(line.strip().split("=", 1) for line in f if "=" in line)
+system = os_release.get("PRETTY_NAME", "unknown").strip('"')
+
+print(f"This report covers **{len(packages):,} installed packages** on "
+      f"**{socket.gethostname() if not APT_ROOT else APT_ROOT}** ({system}), "
+      f"generated on {datetime.now():%Y-%m-%d}.\n")
+
+counts = findings.groupby("Severity")["Count"].size().reindex(SEVERITY_ORDER, fill_value=0)
+if len(findings) == 0:
+    print("\\textcolor{sevok}{\\faIcon{check-circle}}~**No finding**: the installed software is up to date and "
+          "comes from trusted, maintained repositories.\n")
+else:
+    summary = ", ".join(f"{n} {level.lower()}" for level, n in counts.items() if n)
+    print(f"The audit raised **{len(findings)} findings** ({summary}).\n")
+    table = pd.DataFrame({
+        "Severity": findings["Severity"].map(severity),
+        "Finding": [f"{f} (**{c}**)" for f, c in zip(findings["Finding"], findings["Count"])],
+        "Recommendation": findings["Recommendation"],
+    })
+    print(table.to_markdown(index=False))
+    print()
+```
+
+```{python}
+#| echo: false
+#| output: asis
+
+print("## Key Figures\n")
+manual = int((~packages["auto_installed"]).sum())
+kpis = pd.DataFrame([
+    ("Installed packages", f"{len(packages):,}"),
+    ("Installed on purpose / as dependencies", f"{manual:,} / {len(packages) - manual:,}"),
+    ("Disk space used", f"{packages['installed_size_kb'].sum() / 1024 / 1024:,.1f} GB"),
+    ("Third-party packages installed on purpose", f"{len(third_party):,}"),
+    ("Enabled repositories (type x URI x suite)", f"{len(enabled_sources):,}"),
+    ("Packages apt never updates (orphaned)", f"{len(orphans):,}"),
+    ("Pending updates (of which security)", f"{len(upgradable):,} ({len(security_upgrades):,})" if not APT_ROOT else "not checked"),
+    ("Last package list refresh", f"{last_update:%Y-%m-%d %H:%M} ({days_since_update} days ago)" if last_update else "never"),
+], columns=["Indicator", "Value"])
+print(kpis.to_markdown(index=False))
+```
+
+---
+
+# \faIcon{info-circle} Scope and Method
+
+The **apt** extension for DuckDB exposes the state of the apt/dpkg package manager as SQL tables. This report only reads local files, it does not modify the system or contact any server:
+
+- **Installed packages**, from `/var/lib/dpkg/status` and `/var/lib/apt/extended_states`: `apt_packages()`, `apt_dependencies()`, `apt_provides()`
+- **Configured repositories**, from `/etc/apt/sources.list` and `/etc/apt/sources.list.d/`: `apt_sources()`
+- **Package origins**, from the indexes downloaded by `apt update` in `/var/lib/apt/lists/`: `apt_package_origins()`
+- **Pending updates**, from `apt list --upgradable`: `apt_upgradable()`
+
+Origins and pending updates are only as fresh as the last `apt update`. Software installed outside apt (snaps, Flatpaks, language package managers, manual installs in `/opt`) is **out of scope**.
+
+```{python}
+#| echo: false
+#| output: asis
+
+version = query_apt("SELECT apt_version() AS version")["version"][0] if not APT_ROOT else None
+facts = pd.DataFrame([
+    ("Host", socket.gethostname() if not APT_ROOT else f"{APT_ROOT} (offline audit)"),
+    ("Operating system", system),
+    ("Kernel", platform.release() if not APT_ROOT else "n/a"),
+    ("apt version", version or "n/a"),
+    ("Report date", f"{datetime.now():%Y-%m-%d %H:%M}"),
+], columns=["Item", "Value"])
+print(facts.to_markdown(index=False))
+```
+
+# \faIcon{rocket} Getting Started with the apt Extension
+
+## \faIcon{tachometer-alt} What the Extension Gives You
+
+Each function replaces a command, or a parsing script, with a table that can be filtered, joined and exported. Rows and timings below are measured on this machine (timings include starting DuckDB):
+
+```{python}
+#| echo: false
+#| output: asis
+
+import time
+
+functions = [
+    ("apt_packages()", "What is installed, how big, installed on purpose or as a dependency?",
+     "`dpkg-query`, `apt-mark showauto`"),
+    ("apt_dependencies()", "What depends on what?", "`apt-cache depends`, `apt-cache rdepends`"),
+    ("apt_provides()", "Which package provides a virtual package?", "`apt-cache showpkg`"),
+    ("apt_sources()", "Which repositories are configured, and how are they trusted?",
+     "reading `sources.list.d` by hand"),
+    ("apt_package_origins()", "Which repository does each package come from?", "`apt-cache policy`, per package"),
+    ("apt_upgradable()", "Which updates are pending?", "`apt list --upgradable`"),
+]
+rows = []
+for function, question, replaces in functions:
+    if APT_ROOT and function == "apt_upgradable()":
+        continue
+    call = function.replace("()", f"({ROOT})") if function != "apt_upgradable()" else function
+    start = time.perf_counter()
+    count = query_apt(f"SELECT count(*) AS n FROM {call}")["n"][0]
+    elapsed = time.perf_counter() - start
+    rows.append((f"\\texttt{{{function.replace('_', chr(92) + '_')}}}", question, replaces, f"{count:,}", f"{elapsed:.2f} s"))
+
+print_table(pd.DataFrame(rows, columns=["Function", "Answers", "Replaces", "Rows here", "Time"]),
+            widths=[24, 34, 22, 10, 10])
+index_mb = sum(os.path.getsize(f) for f in glob.glob(f"{APT_ROOT}/var/lib/apt/lists/*_Packages")) / 1024 / 1024
+print(f"`apt_package_origins()` cross-checks every installed package against **{index_mb:,.0f} MB** of repository "
+      "indexes in a single query, where `apt-cache policy` answers for one package at a time.\n")
+```
+
+## \faIcon{play} First Steps
+
+The extension is distributed through the [DuckDB community extensions repository](https://duckdb.org/community_extensions/extensions/apt): from any DuckDB client (CLI, Python, R, ...), install it once and load it in each session:
+
+```sql
+INSTALL apt FROM community;
+LOAD apt;
+
+-- What did I install on purpose?
+SELECT name, version
+FROM apt_packages()
+WHERE NOT auto_installed
+ORDER BY name;
+
+-- Which packages will apt never update?
+SELECT name, version
+FROM apt_packages()
+ANTI JOIN apt_package_origins()
+    USING (name, architecture);
+
+-- Keep a snapshot, to compare machines
+-- or track drift over time
+COPY (SELECT * FROM apt_packages())
+TO 'inventory.parquet';
+```
+
+Every table function except `apt_upgradable()` takes an optional `root` argument to audit another system, e.g. `apt_packages(root := '/mnt/image')`.
+
+# \faIcon{boxes} Inventory
+
+## \faIcon{hdd} Disk Usage by Section
+
+```{python}
+#| echo: false
+#| fig-width: 8
+
+by_section = (packages.assign(section=packages["section"].fillna("(none)"))
+              .groupby("section")["installed_size_kb"].sum()
+              .sort_values(ascending=False).head(12) / 1024)
+hbar(by_section.index.tolist(), by_section.values.tolist(),
+     "Installed size by section (top 12)", "Installed size (MB)")
+```
+
+## \faIcon{user-tag} Third-Party Software
+
+Packages installed on purpose that neither Ubuntu nor Debian publish. Each vendor is an additional party trusted with root access at installation time.
+
+```{python}
+#| echo: false
+#| output: asis
+
+show(third_party.rename(columns={"name": "Package", "version": "Version", "vendor": "Vendor"}))
+```
+
+# \faIcon{link} Software Supply Chain
+
+## \faIcon{server} Configured Repositories
+
+```{python}
+#| echo: false
+#| output: asis
+
+if len(sources):
+    keys = (sources["signed_by"].str.replace(r".*/", "", regex=True)
+            .str.replace(r"(-keyring)?\.(gpg|asc)$", "", regex=True)
+            .str.strip("()").fillna("\\textcolor{sevhigh}{any trusted key}"))
+    table = (sources.assign(key=keys)
+             .groupby(["file", "enabled", "uri", "key"], sort=False)["suite"]
+             .agg(lambda suites: ", ".join(dict.fromkeys(suites))).reset_index())
+    files = table["file"] + table["enabled"].map({True: "", False: "\\newline\\textcolor{gray}{\\footnotesize disabled}"})
+    print_table(pd.DataFrame({
+        "Source file": files,
+        "Repository": table["uri"].map(repository_uri),
+        "Suites": table["suite"].str.replace(", ", "\\newline ", regex=False),
+        "Signing key": table["key"],
+    }), widths=[23, 35, 21, 21])
+    print("\\textcolor{sevhigh}{\\faIcon{lock-open}} fetched over plain HTTP. \\textcolor{gray}{disabled}: "
+          "ignored by apt, the packages installed from it no longer get updates.\n")
+else:
+    print("*No repository configured.*")
+```
+
+A repository is trusted through the key named by `signed-by`. Without it, apt accepts a signature from **any** key of the global keyring, so any vendor key installed there could sign packages for every such repository. `trusted=yes` disables signature checks altogether.
+
+## \faIcon{exclamation-triangle} Repository Risks
+
+```{python}
+#| echo: false
+#| output: asis
+
+if len(sources):
+    risky = enabled_sources.assign(
+        plain_http=enabled_sources["uri"].str.startswith("http://"),
+        no_signed_by=enabled_sources["signed_by"].isna(),
+    )
+    risky = risky[risky["plain_http"] | risky["no_signed_by"] | risky["trusted"]]
+    flags = risky.apply(lambda r: ", ".join(
+        flag for flag, on in [("signature checks disabled", r["trusted"]), ("no signed-by", r["no_signed_by"]),
+                              ("plain HTTP", r["plain_http"])] if on), axis=1)
+    if len(risky):
+        print_table(pd.DataFrame({"Source file": risky["file"], "Repository": risky["uri"].map(repository_uri),
+                                  "Suite": risky["suite"], "Risk": flags}), widths=[20, 38, 20, 22])
+    else:
+        print("*None.*")
+```
+
+## \faIcon{map-marker-alt} Where Installed Packages Come From
+
+Number of installed packages whose exact installed version is published by each repository. A package can be published by several repositories (for example the release and its `-updates` suite), so the counts overlap.
+
+```{python}
+#| echo: false
+#| fig-width: 8
+
+top = repositories.head(12)
+labels = [" / ".join(part for part in row if part) for row in zip(top["repository"], top["suite"], top["component"])]
+hbar(labels, top["packages"].tolist(), "Installed packages by repository (top 12)", "Packages")
+```
+
+## \faIcon{unlink} Orphaned Packages
+
+These installed packages are **unknown to every configured repository**: they were installed from a downloaded `.deb`, or their repository was removed or disabled. `apt upgrade` will never update them, so their vulnerabilities stay open until someone updates them by hand.
+
+```{python}
+#| echo: false
+#| output: asis
+
+show(orphans.rename(columns={"name": "Package", "version": "Version", "vendor": "Vendor", "size_mb": "Size (MB)"}),
+     "*None: every installed package is provided by a configured repository.*")
+```
+
+## \faIcon{code-branch} Versions Not Found in Any Repository
+
+The repositories know these packages, but not the installed version: a local rebuild, a version pinned from an older release, or a leftover from a distribution upgrade.
+
+```{python}
+#| echo: false
+#| output: asis
+
+show(not_in_repo.rename(columns={"name": "Package", "installed_version": "Installed", "available_versions": "Available"}))
+```
+
+# \faIcon{sync-alt} Patch Posture
+
+```{python}
+#| echo: false
+#| output: asis
+
+if last_update:
+    print(f"Package lists were last refreshed on **{last_update:%Y-%m-%d %H:%M}** "
+          f"({days_since_update} days before this report).\n")
+if APT_ROOT:
+    print("Pending updates are not checked for an offline audit.\n")
+else:
+    print(f"**{len(upgradable)} updates** are pending, **{len(security_upgrades)}** of them from a security repository.\n")
+```
+
+## \faIcon{shield-alt} Pending Security Updates
+
+```{python}
+#| echo: false
+#| output: asis
+
+show(security_upgrades[["name", "current_version", "new_version", "repository"]]
+     .rename(columns={"name": "Package", "current_version": "Installed", "new_version": "Available", "repository": "Repository"}),
+     "*None: no security update is pending.*")
+```
+
+## \faIcon{users} Community-Maintained Packages
+
+```{python}
+#| echo: false
+#| output: asis
+
+if universe:
+    coverage = ("Ubuntu Pro **ESM Apps is enabled**, which extends security maintenance to universe."
+                if esm_apps else "**ESM Apps is not enabled**: security fixes for these packages depend on community effort.")
+    print(f"**{universe:,} installed packages** come from Ubuntu's *universe* component, maintained by the community "
+          f"rather than by Canonical. {coverage}")
+else:
+    print("*No package from Ubuntu universe.*")
+```
+
+# \faIcon{project-diagram} Dependency Risk
+
+A package many others depend on is a high-value target: a vulnerability or a compromise in it reaches everything above it. Virtual dependencies (such as `mail-transport-agent`) are resolved to the installed packages that provide them.
+
+```{python}
+#| echo: false
+#| output: false
+
+edges = query_apt(f"""
+    WITH deps AS (
+        SELECT DISTINCT package, dependency
+        FROM apt_dependencies({ROOT})
+        WHERE relation IN ('Pre-Depends', 'Depends')
+    ),
+    installed AS (SELECT DISTINCT name FROM apt_packages({ROOT}))
+    SELECT DISTINCT d.package, coalesce(i.name, v.package) AS dependency
+    FROM deps d
+    LEFT JOIN installed i ON i.name = d.dependency
+    LEFT JOIN apt_provides({ROOT}) v ON i.name IS NULL AND v.provides = d.dependency
+    WHERE coalesce(i.name, v.package) IS NOT NULL AND d.package <> coalesce(i.name, v.package)
+""")
+graph = nx.DiGraph()
+graph.add_nodes_from(packages["name"])
+graph.add_edges_from(edges[["package", "dependency"]].itertuples(index=False, name=None))
+```
+
+## \faIcon{bullseye} Most Depended-On Packages
+
+```{python}
+#| echo: false
+#| fig-width: 8
+
+dependents = pd.Series(dict(graph.in_degree())).sort_values(ascending=False).head(15)
+hbar(dependents.index.tolist(), dependents.values.tolist(),
+     "Packages with the most direct dependents (top 15)", "Installed packages depending on it directly")
+```
+
+## \faIcon{sitemap} Transitive Reach
+
+Direct dependents understate the reach of low-level libraries. The number of packages that depend on a package **directly or transitively** is its blast radius if it is compromised.
+
+```{python}
+#| echo: false
+#| fig-width: 8
+
+candidates = pd.Series(dict(graph.in_degree())).sort_values(ascending=False).head(40).index
+reach = pd.Series({node: len(nx.ancestors(graph, node)) for node in candidates})
+reach = reach.sort_values(ascending=False).head(15)
+hbar(reach.index.tolist(), reach.values.tolist(),
+     "Packages with the largest blast radius (top 15)", "Installed packages depending on it, directly or transitively")
+```
+
+## \faIcon{share-alt} Dependency Network and Centrality
+
+Graph data science ranks packages beyond simple counts:
+
+- **PageRank** scores a package by how much of the system depends on it, weighting dependents by their own importance: the targets of choice for a supply chain attack.
+- **Betweenness centrality** measures how often a package lies on the dependency paths between other packages: the bridges through which a compromise propagates.
+
+The network shows the 25 packages with the largest blast radius and the dependencies between them. Node size is the number of direct dependents, color the betweenness centrality.
+
+```{python}
+#| echo: false
+#| fig-width: 10
+#| fig-height: 8.5
+
+from matplotlib.colors import LinearSegmentedColormap
+
+# Betweenness on a sample of 500 source nodes: exact values cost O(nodes x edges)
+betweenness = nx.betweenness_centrality(graph, k=min(500, graph.number_of_nodes()), seed=42)
+pagerank = nx.pagerank(graph)
+blast = {node: len(nx.ancestors(graph, node)) for node in candidates}
+core = sorted(blast, key=blast.get, reverse=True)[:25]
+sub = graph.subgraph(core).copy()
+sub.remove_nodes_from(list(nx.isolates(sub)))
+in_degree = dict(graph.in_degree())
+core = list(sub.nodes())
+
+# Single-hue sequential scale, light to dark blue
+blues = LinearSegmentedColormap.from_list("blues", ["#cfe0f7", "#2a78d6", "#0d3a75"])
+fig, ax = plt.subplots(figsize=(10, 8.5))
+pos = nx.kamada_kawai_layout(sub.to_undirected())
+nx.draw_networkx_edges(sub, pos, ax=ax, edge_color="#d6d5d0", width=0.7, arrowsize=8, node_size=600,
+                       connectionstyle="arc3,rad=0.08")
+sizes = [150 + 1600 * in_degree[node] / max(in_degree[n] for n in core) for node in sub.nodes()]
+colors = [betweenness[node] for node in sub.nodes()]
+nodes = nx.draw_networkx_nodes(sub, pos, ax=ax, node_size=sizes, node_color=colors, cmap=blues,
+                               edgecolors="white", linewidths=2)
+for node, (x, y) in pos.items():
+    ax.annotate(node, (x, y), xytext=(0, 9 + 10 * in_degree[node] / max(in_degree[n] for n in core)),
+                textcoords="offset points", ha="center", fontsize=8, color=INK,
+                bbox=dict(boxstyle="round,pad=0.15", fc="white", ec="none", alpha=0.8))
+colorbar = plt.colorbar(nodes, ax=ax, fraction=0.035, pad=0.02)
+colorbar.set_label("Betweenness centrality", color=MUTED)
+colorbar.outline.set_visible(False)
+ax.set_title("Core dependency network: the 25 packages with the largest blast radius", loc="left", pad=12)
+ax.axis("off")
+plt.tight_layout()
+plt.show()
+```
+
+```{python}
+#| echo: false
+#| output: asis
+
+top = sorted(pagerank, key=pagerank.get, reverse=True)[:10]
+print_table(pd.DataFrame({
+    "Package": top,
+    "Direct dependents": [f"{in_degree[n]:,}" for n in top],
+    "Blast radius": [f"{len(nx.ancestors(graph, n)):,}" for n in top],
+    "PageRank": [f"{pagerank[n]:.4f}" for n in top],
+    "Betweenness": [f"{betweenness[n]:.4f}" for n in top],
+}), widths=[28, 18, 18, 18, 18])
+
+hidden = [n for n in top if in_degree[n] <= 2 and len(nx.ancestors(graph, n)) > 1000]
+if hidden:
+    print(f"`{hidden[0]}` has only {in_degree[hidden[0]]} direct dependent(s), yet the blast radius of the packages "
+          "depending on it: a package is as critical as what depends on it, which direct counts miss and PageRank "
+          "captures.\n")
+
+bridges = sorted(betweenness, key=betweenness.get, reverse=True)[:5]
+print(f"The top bridges by betweenness are {', '.join(f'`{n}`' for n in bridges)}: they are not the most depended-on "
+      "packages, but many dependency chains go through them, so they deserve the same patching priority.\n")
+```
+
+## \faIcon{external-link-alt} What Third-Party Software Pulls In
+
+Third-party and orphaned packages run on top of distribution libraries: these are updated by the distribution, but the software using them is not reviewed by it. The more a third-party package relies on, the more it is exposed to their vulnerabilities.
+
+```{python}
+#| echo: false
+#| fig-width: 8
+
+vendors = sorted(set(third_party["name"]) | set(orphans["name"]))
+pulled_in = pd.Series({name: len(nx.descendants(graph, name)) for name in vendors}).sort_values(ascending=False)
+if len(pulled_in) and pulled_in.max() > 0:
+    hbar(pulled_in.index.tolist(), pulled_in.values.tolist(),
+         "Installed packages each third-party package relies on", "Dependencies, direct and transitive")
+```
+
+A distribution library used by several third-party packages is a single point of exposure for all of them. The graph links each third-party package (left) to the direct dependencies it shares with at least one other (right).
+
+```{python}
+#| echo: false
+#| fig-width: 10
+#| fig-height: 7
+
+shared = pd.Series([dep for name in vendors for _, dep in graph.out_edges(name)]).value_counts()
+shared = shared[shared > 1].head(14)
+links = [(name, dep) for name in vendors for _, dep in graph.out_edges(name) if dep in shared.index]
+if links:
+    left = sorted({name for name, _ in links}, key=lambda n: -sum(1 for v, _ in links if v == n))
+    right = shared.index.tolist()
+    pos = {name: (0, -i * (len(right) - 1) / max(len(left) - 1, 1)) for i, name in enumerate(left)}
+    pos.update({dep: (1, -i) for i, dep in enumerate(right)})
+    bipartite = nx.Graph(links)
+
+    fig, ax = plt.subplots(figsize=(10, 7))
+    nx.draw_networkx_edges(bipartite, pos, ax=ax, edge_color="#c9c8c3", width=0.9)
+    nx.draw_networkx_nodes(bipartite, pos, nodelist=left, ax=ax, node_color=BLUE, node_size=180,
+                           edgecolors="white", linewidths=2, label="Third-party or orphaned package")
+    nx.draw_networkx_nodes(bipartite, pos, nodelist=right, ax=ax, node_color=NEUTRAL, node_size=120,
+                           edgecolors="white", linewidths=2, label="Shared dependency")
+    for name in left:
+        ax.text(pos[name][0] - 0.03, pos[name][1], name, ha="right", va="center", fontsize=9, color=INK)
+    for dep in right:
+        ax.text(pos[dep][0] + 0.03, pos[dep][1], f"{dep} ({shared[dep]})", ha="left", va="center", fontsize=9,
+                color=INK)
+    ax.set_xlim(-0.6, 1.6)
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, 0), ncol=2, frameon=False, labelcolor=INK)
+    ax.set_title("Dependencies shared by third-party packages (number of users)", loc="left", pad=12)
+    ax.axis("off")
+    plt.tight_layout()
+    plt.show()
+```
+
+# \faIcon{tasks} Recommendations
+
+```{python}
+#| echo: false
+#| output: asis
+
+if len(findings) == 0:
+    print("No action required. Keep regenerating this report to detect drift.")
+else:
+    for i, row in enumerate(findings.itertuples(index=False), start=1):
+        print(f"{i}. {severity(row.Severity)} — **{row.Finding}** ({row.Count}): {row.Recommendation}.")
+```
+
+Re-run this report after applying the recommendations, and regularly afterwards: since every figure is a SQL query, the same checks can feed continuous monitoring (for example a daily export of `apt_packages()` and `apt_package_origins()` to Parquet).
+
+# \faIcon{book} Appendix
+
+## \faIcon{redo} Reproducing This Report
+
+The report installs the extension from the community repository into the `duckdb` CLI found on the `PATH`:
+
+```bash
+git clone https://github.com/adriens/duckdb-apt && cd duckdb-apt
+task report
+
+# Audit another system, e.g. a mounted disk image
+APT_ROOT=/mnt/image task report
+```
+
+## \faIcon{database} Key Queries
+
+The findings come from plain SQL on top of the extension:
+
+```sql
+INSTALL apt FROM community;
+LOAD apt;
+
+-- Orphaned packages: unknown to every
+-- configured repository (ANTI JOIN keeps the
+-- packages without a matching origin)
+SELECT p.name, p.version, p.maintainer
+FROM apt_packages() p
+ANTI JOIN apt_package_origins() o
+    USING (name, architecture);
+
+-- Risky repository settings
+SELECT
+    file,
+    uri,
+    suite,
+    signed_by IS NULL AS no_signed_by,
+    trusted
+FROM apt_sources()
+WHERE enabled
+  AND (
+      uri LIKE 'http://%'
+      OR signed_by IS NULL
+      OR trusted
+  );
+
+-- Pending security updates
+SELECT
+    name,
+    current_version,
+    new_version,
+    repository
+FROM apt_upgradable()
+WHERE repository LIKE '%-security%';
+```
+
+More queries in [docs/examples.sql](https://github.com/adriens/duckdb-apt/blob/main/docs/examples.sql).
+
+## \faIcon{link} References
+
+- **DuckDB**: [https://duckdb.org](https://duckdb.org)
+- **Debian Policy, control fields**: [https://www.debian.org/doc/debian-policy/ch-controlfields.html](https://www.debian.org/doc/debian-policy/ch-controlfields.html)
+- **Debian wiki, third-party repositories and signed-by**: [https://wiki.debian.org/DebianRepository/UseThirdParty](https://wiki.debian.org/DebianRepository/UseThirdParty)
+- **sources.list(5)**: [https://manpages.debian.org/sources.list](https://manpages.debian.org/sources.list)
+- **Ubuntu Pro / ESM**: [https://ubuntu.com/pro](https://ubuntu.com/pro)
+- **Supply Chain Levels for Software Artifacts (SLSA)**: [https://slsa.dev](https://slsa.dev)
+
+## \faIcon{info-circle} Project Information
+
+- **Community extension page**: [https://duckdb.org/community_extensions/extensions/apt](https://duckdb.org/community_extensions/extensions/apt)
+- **GitHub Repository**: [https://github.com/adriens/duckdb-apt](https://github.com/adriens/duckdb-apt)
+- **Sibling project for Homebrew**: [https://github.com/adriens/duckdb-brew](https://github.com/adriens/duckdb-brew)
+- **Author**: Adrien SALES ([@rastadidi](https://x.com/rastadidi))

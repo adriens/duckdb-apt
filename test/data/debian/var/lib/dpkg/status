@@ -1,0 +1,97 @@
+Package: libc6
+Status: install ok installed
+Priority: required
+Section: libs
+Installed-Size: 12000
+Maintainer: Debian GLIBC Maintainers <debian-glibc@lists.debian.org>
+Architecture: amd64
+Multi-Arch: same
+Source: glibc (2.36-9)
+Version: 2.36-9+deb12u1
+Depends: libgcc-s1
+Provides: libc6-abi (= 2.36)
+Description: GNU C Library: Shared libraries
+ Contains the standard libraries that are used by nearly all programs on
+ the system.
+Homepage: https://www.gnu.org/software/libc/libc.html
+
+Package: libgcc-s1
+Status: install ok installed
+Priority: optional
+Section: libs
+Installed-Size: 140
+Maintainer: Debian GCC Maintainers <debian-gcc@lists.debian.org>
+Architecture: amd64
+Multi-Arch: same
+Source: gcc-12
+Version: 12.2.0-14
+Description: GCC support library
+
+Package: curl
+Status: install ok installed
+Priority: optional
+Section: web
+Installed-Size: 500
+Maintainer: Debian Curl Maintainers <team+curl@tracker.debian.org>
+Architecture: amd64
+Version: 7.88.1-10+deb12u5
+Depends: libc6 (>= 2.34), python3:any,
+ mail-transport-agent | postfix
+Recommends: ca-certificates
+Suggests: curl-doc [amd64] <!nocheck>
+Description: command line tool for transferring data with URL syntax
+Homepage: https://curl.se
+
+Package: python3
+Status: install ok installed
+Priority: optional
+Section: python
+Installed-Size: 90
+Maintainer: Matthias Klose <doko@debian.org>
+Architecture: amd64
+Multi-Arch: allowed
+Source: python3-defaults
+Version: 3.11.2-1+b1
+Provides: python3-profiler (= 3.11.2-1+b1)
+Description: interactive high-level object-oriented language (default python3 version)
+
+Package: postfix
+Status: install ok installed
+Priority: optional
+Section: mail
+Installed-Size: 4000
+Maintainer: LaMont Jones <lamont@debian.org>
+Architecture: amd64
+Version: 3.7.11-0+deb12u1
+Provides: default-mta, mail-transport-agent
+Depends: libc6 (>= 2.34)
+Description: High-performance mail transport agent
+
+Package: tzdata
+Status: install ok installed
+Priority: required
+Section: localization
+Installed-Size: 3200
+Maintainer: GNU Libc Maintainers <debian-glibc@lists.debian.org>
+Architecture: all
+Multi-Arch: foreign
+Version: 2024a-0+deb12u1
+Description: time zone and daylight-saving time data
+
+Package: localtool
+Status: hold ok installed
+Installed-Size: 10
+Maintainer: Local Admin <admin@example.org>
+Architecture: all
+Version: 1.0
+Description: tool installed from a local .deb
+
+Package: oldpkg
+Status: deinstall ok config-files
+Priority: optional
+Section: misc
+Installed-Size: 20
+Maintainer: Someone <someone@example.org>
+Architecture: amd64
+Version: 0.9
+Description: removed package with leftover configuration files

@@ -1,0 +1,47 @@
+version: '3'
+
+vars:
+  QMD_FILE: apt-security-report.qmd
+  PDF_FILE: apt-security-report.pdf
+  PDF_ENGINE: xelatex
+
+tasks:
+  install-deps:
+    desc: "Create docs/.venv with the Python dependencies of the report"
+    dir: docs
+    cmds:
+      - uv venv --python 3.12 .venv
+      - uv pip install --python .venv/bin/python -r requirements.txt
+    status:
+      - test -x .venv/bin/python
+
+  report:
+    desc: "Render the security report to PDF (set APT_ROOT to audit another system)"
+    dir: docs
+    deps: [install-deps]
+    env:
+      QUARTO_PYTHON: .venv/bin/python
+    cmds:
+      - quarto render {{.QMD_FILE}} --to pdf --pdf-engine={{.PDF_ENGINE}}
+    preconditions:
+      - sh: test -f ../build/release/extension/apt/apt.duckdb_extension || command -v duckdb
+        msg: "Install the duckdb CLI (the report then installs the apt community extension), or build this repository"
+
+  open:
+    desc: "Open the rendered report"
+    dir: docs
+    cmds:
+      - xdg-open {{.PDF_FILE}}
+    preconditions:
+      - test -f {{.PDF_FILE}}
+
+  clean:
+    desc: "Remove the rendered report and Quarto caches"
+    dir: docs
+    cmds:
+      - rm -rf {{.PDF_FILE}} apt-security-report.tex apt-security-report_files .quarto
+
+  default:
+    desc: "Render the security report"
+    cmds:
+      - task: report

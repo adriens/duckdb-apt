@@ -111,6 +111,51 @@ WHERE p.auto_installed
 ORDER BY size_mb DESC;
 
 -------------------------------------------------------------------------------
+-- Software supply chain
+-------------------------------------------------------------------------------
+
+-- Configured repositories
+SELECT regexp_extract(file, '[^/]+$') AS file, enabled, type, uri, suite, components, signed_by
+FROM apt_sources()
+ORDER BY file, suite;
+
+-- Risky repository settings: plain HTTP, no key pinning, signature checks disabled
+SELECT regexp_extract(file, '[^/]+$') AS file, uri, suite,
+       uri LIKE 'http://%' AS plain_http,
+       signed_by IS NULL AS any_trusted_key_accepted,
+       trusted AS signature_check_disabled
+FROM apt_sources()
+WHERE enabled
+  AND (uri LIKE 'http://%' OR signed_by IS NULL OR trusted);
+
+-- Where installed packages come from
+SELECT origin, suite, component, site, count(*) AS packages
+FROM apt_package_origins()
+WHERE is_installed_version
+GROUP BY ALL
+ORDER BY packages DESC;
+
+-- Orphaned packages: no configured repository knows them, apt will never update them
+SELECT p.name, p.version, p.maintainer
+FROM apt_packages() p
+ANTI JOIN apt_package_origins() o USING (name, architecture)
+ORDER BY p.name;
+
+-- Installed version available in no repository (local build, or leftover from an older release)
+SELECT p.name, p.version AS installed_version, list(DISTINCT o.available_version) AS available_versions
+FROM apt_packages() p
+JOIN apt_package_origins() o USING (name, architecture)
+GROUP BY ALL
+HAVING NOT bool_or(o.is_installed_version)
+ORDER BY p.name;
+
+-- Installed from Ubuntu's universe component (community maintained, security fixes only with Ubuntu Pro)
+SELECT DISTINCT o.name, o.installed_version
+FROM apt_package_origins() o
+WHERE o.is_installed_version AND o.origin = 'Ubuntu' AND o.component = 'universe'
+ORDER BY o.name;
+
+-------------------------------------------------------------------------------
 -- Upgrades (as of the last `apt update`)
 -------------------------------------------------------------------------------
 

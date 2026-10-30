@@ -1,0 +1,30 @@
+Package: libc6
+Architecture: amd64
+Version: 2.36-9+deb12u1
+Filename: pool/main/g/glibc/libc6_2.36-9+deb12u1_amd64.deb
+
+Package: libgcc-s1
+Architecture: amd64
+Version: 12.2.0-14
+Filename: pool/main/g/gcc-12/libgcc-s1_12.2.0-14_amd64.deb
+
+Package: curl
+Architecture: amd64
+Version: 7.88.1-10+deb12u4
+Filename: pool/main/c/curl/curl_7.88.1-10+deb12u4_amd64.deb
+
+Package: python3
+Version: 3.11.2-1+b1
+Architecture: amd64
+
+Package: postfix
+Architecture: amd64
+Version: 3.7.11-0+deb12u1
+
+Package: tzdata
+Architecture: all
+Version: 2024a-0+deb12u1
+
+Package: nginx
+Architecture: amd64
+Version: 1.22.1-9

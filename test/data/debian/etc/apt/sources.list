@@ -1,0 +1,4 @@
+# Main archive
+deb [arch=amd64,i386 signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] http://deb.example.org/debian bookworm main contrib # trailing comment
+# deb http://deb.example.org/debian bookworm-backports main
+deb-src http://deb.example.org/debian bookworm main

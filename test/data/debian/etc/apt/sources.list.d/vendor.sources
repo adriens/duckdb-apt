@@ -1,0 +1,17 @@
+# Written by a vendor installer
+Types: deb
+URIs: https://security.example.org/debian-security
+Suites: bookworm-security bookworm-updates
+Components: main
+Signed-By: -----BEGIN PGP PUBLIC KEY BLOCK-----
+ .
+ mQINBGTyJS0BEADPMYH+JZ6TFqBthIy+12hB6tx+wVOvb8+qgtVa38eB07k/ydYN
+ -----END PGP PUBLIC KEY BLOCK-----
+
+Types: deb deb-src
+URIs: https://vendor.example.org/apt
+Suites: stable
+Components: main
+Architectures: amd64
+Trusted: yes
+Enabled: no

@@ -78,6 +78,38 @@ WHERE relation IN ('Depends', 'Pre-Depends') AND NOT alternative
 
 query I
 SELECT COUNT(*) >= 0 FROM (
+    SELECT file, format, enabled, type, uri, suite, components, architectures, signed_by, trusted
+    FROM apt_sources() LIMIT 1
+);
+----
+true
+
+query I
+SELECT COUNT(*) FROM apt_sources()
+WHERE type NOT IN ('deb', 'deb-src') OR format NOT IN ('one-line', 'deb822') OR uri IS NULL OR suite IS NULL;
+----
+0
+
+query I
+SELECT COUNT(*) >= 0 FROM (
+    SELECT name, architecture, installed_version, available_version, is_installed_version, origin, label, suite,
+           codename, component, site
+    FROM apt_package_origins() LIMIT 1
+);
+----
+true
+
+# Origins are only reported for installed packages, with their installed version
+query I
+SELECT COUNT(*) FROM apt_package_origins() o
+LEFT JOIN apt_packages() p USING (name, architecture)
+WHERE p.name IS NULL OR p.version <> o.installed_version
+   OR o.is_installed_version <> (o.installed_version = o.available_version);
+----
+0
+
+query I
+SELECT COUNT(*) >= 0 FROM (
     SELECT name, repository, current_version, new_version, architecture FROM apt_upgradable() LIMIT 1
 );
 ----

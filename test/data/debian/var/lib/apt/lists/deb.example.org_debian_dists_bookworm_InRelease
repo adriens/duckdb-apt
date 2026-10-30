@@ -1,0 +1,16 @@
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA256
+
+Origin: Debian
+Label: Debian
+Suite: stable
+Codename: bookworm
+Date: Sat, 10 Feb 2024 10:00:00 UTC
+Architectures: amd64 i386
+Components: main contrib
+SHA256:
+ 0000000000000000000000000000000000000000000000000000000000000000 1000 main/binary-amd64/Packages
+-----BEGIN PGP SIGNATURE-----
+
+iQIzBAEBCAAdFiEE
+-----END PGP SIGNATURE-----

@@ -7,3 +7,10 @@ testext
 test/python/__pycache__/
 .Rhistory
 .cache
+
+# Security report: rendered output describes a real machine, never commit it
+docs/.venv
+docs/.quarto
+docs/*.pdf
+docs/*.tex
+docs/*_files/

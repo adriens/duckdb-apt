@@ -1,0 +1,5 @@
+Origin: Debian
+Label: Debian-Security
+Suite: stable-security
+Codename: bookworm-security
+Components: main

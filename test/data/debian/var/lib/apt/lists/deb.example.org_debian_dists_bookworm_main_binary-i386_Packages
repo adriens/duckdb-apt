@@ -1,0 +1,7 @@
+Package: tzdata
+Architecture: all
+Version: 2024a-0+deb12u1
+
+Package: libc6
+Architecture: i386
+Version: 2.36-9+deb12u1
