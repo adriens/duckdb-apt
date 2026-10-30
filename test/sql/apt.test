@@ -50,6 +50,34 @@ true
 
 query I
 SELECT COUNT(*) >= 0 FROM (
+    SELECT package, architecture, provides, version FROM apt_provides() LIMIT 1
+);
+----
+true
+
+# Every provider is an installed package
+query I
+SELECT COUNT(*) FROM apt_provides() WHERE package NOT IN (SELECT name FROM apt_packages());
+----
+0
+
+# Architecture qualifiers such as "python3:any" are stripped
+query I
+SELECT COUNT(*) FROM apt_dependencies() WHERE dependency LIKE '%:%';
+----
+0
+
+# On a consistent system every non-alternative hard dependency is satisfied by a package or a Provides
+query I
+SELECT COUNT(*) FROM apt_dependencies()
+WHERE relation IN ('Depends', 'Pre-Depends') AND NOT alternative
+  AND dependency NOT IN (SELECT name FROM apt_packages())
+  AND dependency NOT IN (SELECT provides FROM apt_provides());
+----
+0
+
+query I
+SELECT COUNT(*) >= 0 FROM (
     SELECT name, repository, current_version, new_version, architecture FROM apt_upgradable() LIMIT 1
 );
 ----

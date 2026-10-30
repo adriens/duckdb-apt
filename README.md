@@ -13,11 +13,14 @@ On systems without dpkg (macOS, Fedora, ...) every function simply returns no ro
 | `apt_version()` | scalar | Version of the local `apt` |
 | `apt_packages()` | table | Installed packages: `name`, `version`, `architecture`, `section`, `priority`, `installed_size_kb`, `maintainer`, `homepage`, `source`, `description`, `multi_arch`, `auto_installed` |
 | `apt_dependencies()` | table | One row per dependency alternative: `package`, `architecture`, `relation` (`Pre-Depends`, `Depends`, `Recommends`, `Suggests`), `dependency`, `version_constraint`, `alternative` |
+| `apt_provides()` | table | Virtual packages provided by installed packages: `package`, `architecture`, `provides`, `version` |
 | `apt_upgradable()` | table | Packages with a newer version available: `name`, `repository`, `current_version`, `new_version`, `architecture` |
 
 `auto_installed` is `true` for packages pulled in as dependencies, `false` for the ones you asked for explicitly (see `apt-mark showmanual`). `apt_upgradable()` reflects the last `apt update`.
 
 ## Examples
+
+More in [docs/examples.sql](docs/examples.sql).
 
 ```sql
 LOAD apt;

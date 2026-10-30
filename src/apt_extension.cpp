@@ -111,6 +111,7 @@ struct AptPackage {
 	string pre_depends;
 	string recommends;
 	string suggests;
+	string provides;
 	int64_t installed_size_kb;
 	bool auto_installed;
 };
@@ -152,6 +153,7 @@ static vector<AptPackage> ReadInstalledPackages() {
 		pkg.pre_depends = GetField(stanza, "Pre-Depends");
 		pkg.recommends = GetField(stanza, "Recommends");
 		pkg.suggests = GetField(stanza, "Suggests");
+		pkg.provides = GetField(stanza, "Provides");
 
 		// Source is "name" or "name (version)", and is absent when it matches the package name
 		pkg.source = GetField(stanza, "Source");
@@ -308,8 +310,8 @@ static void ParseRelation(const AptPackage &pkg, const string &relation, const s
 				StringUtil::Trim(dep.version_constraint);
 				entry = entry.substr(0, paren);
 			}
-			// Drop architecture restrictions such as "[amd64]" or "<!nocheck>"
-			auto bracket = entry.find_first_of("[<");
+			// Drop architecture restrictions such as "[amd64]" or "<!nocheck>", and qualifiers such as ":any"
+			auto bracket = entry.find_first_of("[<:");
 			if (bracket != string::npos) {
 				entry = entry.substr(0, bracket);
 			}
@@ -359,6 +361,53 @@ static void AptDependenciesFunction(ClientContext &context, TableFunctionInput &
 		output.SetValue(3, count, Value(dep.dependency));
 		output.SetValue(4, count, StringOrNull(dep.version_constraint));
 		output.SetValue(5, count, Value::BOOLEAN(dep.alternative));
+		count++;
+	}
+
+	local_state.batch_index += count;
+	output.SetCardinality(count);
+}
+
+//===--------------------------------------------------------------------===//
+// apt_provides()
+//===--------------------------------------------------------------------===//
+static unique_ptr<FunctionData> AptProvidesBind(ClientContext &context, TableFunctionBindInput &input,
+                                                vector<LogicalType> &return_types, vector<Identifier> &names) {
+	auto result = make_uniq<AptDependenciesBindData>();
+	for (auto &pkg : ReadInstalledPackages()) {
+		ParseRelation(pkg, "Provides", pkg.provides, result->dependencies);
+	}
+	// Provides only allows exact versions, e.g. "dbus-system-bus (= 1.16.2)"
+	for (auto &dep : result->dependencies) {
+		if (StringUtil::StartsWith(dep.version_constraint, "=")) {
+			dep.version_constraint = dep.version_constraint.substr(1);
+			StringUtil::Trim(dep.version_constraint);
+		}
+	}
+
+	names.emplace_back("package");
+	return_types.emplace_back(LogicalType::VARCHAR);
+	names.emplace_back("architecture");
+	return_types.emplace_back(LogicalType::VARCHAR);
+	names.emplace_back("provides");
+	return_types.emplace_back(LogicalType::VARCHAR);
+	names.emplace_back("version");
+	return_types.emplace_back(LogicalType::VARCHAR);
+
+	return std::move(result);
+}
+
+static void AptProvidesFunction(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
+	auto &data = data_p.bind_data->CastNoConst<AptDependenciesBindData>();
+	auto &local_state = data_p.local_state->Cast<AptLocalState>();
+	idx_t count = 0;
+
+	for (idx_t i = local_state.batch_index; i < data.dependencies.size() && count < STANDARD_VECTOR_SIZE; i++) {
+		auto &dep = data.dependencies[i];
+		output.SetValue(0, count, Value(dep.package));
+		output.SetValue(1, count, Value(dep.architecture));
+		output.SetValue(2, count, Value(dep.dependency));
+		output.SetValue(3, count, StringOrNull(dep.version_constraint));
 		count++;
 	}
 
@@ -453,6 +502,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	TableFunction apt_dependencies("apt_dependencies", {}, AptDependenciesFunction, AptDependenciesBind);
 	apt_dependencies.init_local = AptInitLocal;
 	loader.RegisterFunction(apt_dependencies);
+
+	TableFunction apt_provides("apt_provides", {}, AptProvidesFunction, AptProvidesBind);
+	apt_provides.init_local = AptInitLocal;
+	loader.RegisterFunction(apt_provides);
 
 	TableFunction apt_upgradable("apt_upgradable", {}, AptUpgradableFunction, AptUpgradableBind);
 	apt_upgradable.init_local = AptInitLocal;
