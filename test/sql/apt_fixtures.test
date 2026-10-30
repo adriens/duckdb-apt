@@ -4,19 +4,39 @@
 
 require apt
 
-# A root without any apt/dpkg files behaves like a non-Debian system
+# A root without apt/dpkg files behaves like a non-Debian system
 query I
 SELECT COUNT(*) FROM apt_packages(root := 'test/data/does-not-exist');
 ----
 0
 
+# A root without apt/dpkg files behaves like a non-Debian system
 query I
 SELECT COUNT(*) FROM apt_sources(root := 'test/data/does-not-exist');
 ----
 0
 
+# A root without apt/dpkg files behaves like a non-Debian system
 query I
 SELECT COUNT(*) FROM apt_package_origins(root := 'test/data/does-not-exist');
+----
+0
+
+# A root without apt/dpkg files behaves like a non-Debian system
+query I
+SELECT COUNT(*) FROM apt_repositories(root := 'test/data/does-not-exist');
+----
+0
+
+# A root without apt/dpkg files behaves like a non-Debian system
+query I
+SELECT COUNT(*) FROM apt_upgradable(root := 'test/data/does-not-exist');
+----
+0
+
+# A root without apt/dpkg files behaves like a non-Debian system
+query I
+SELECT COUNT(*) FROM apt_history(root := 'test/data/does-not-exist');
 ----
 0
 
@@ -24,26 +44,37 @@ SELECT COUNT(*) FROM apt_package_origins(root := 'test/data/does-not-exist');
 query I
 SELECT COUNT(*) FROM apt_packages(root := 'test/data/debian/');
 ----
-7
+9
 
 # Packages removed with leftover config files (oldpkg) are excluded, held ones (localtool) are kept.
 # postfix is not auto-installed: its extended_states entry is for another architecture.
-query IIIIIIIIIIII
-SELECT * FROM apt_packages(root := 'test/data/debian') ORDER BY name;
+# The purl percent-encodes "+" and keeps "~".
+query IIIIIIIIIIIIII
+SELECT * EXCLUDE (installed_time) FROM apt_packages(root := 'test/data/debian') ORDER BY name;
 ----
-curl	7.88.1-10+deb12u5	amd64	web	optional	500	Debian Curl Maintainers <team+curl@tracker.debian.org>	https://curl.se	curl	command line tool for transferring data with URL syntax	NULL	false
-libc6	2.36-9+deb12u1	amd64	libs	required	12000	Debian GLIBC Maintainers <debian-glibc@lists.debian.org>	https://www.gnu.org/software/libc/libc.html	glibc	GNU C Library: Shared libraries	same	true
-libgcc-s1	12.2.0-14	amd64	libs	optional	140	Debian GCC Maintainers <debian-gcc@lists.debian.org>	NULL	gcc-12	GCC support library	same	true
-localtool	1.0	all	NULL	NULL	10	Local Admin <admin@example.org>	NULL	localtool	tool installed from a local .deb	NULL	false
-postfix	3.7.11-0+deb12u1	amd64	mail	optional	4000	LaMont Jones <lamont@debian.org>	NULL	postfix	High-performance mail transport agent	NULL	false
-python3	3.11.2-1+b1	amd64	python	optional	90	Matthias Klose <doko@debian.org>	NULL	python3-defaults	interactive high-level object-oriented language (default python3 version)	allowed	false
-tzdata	2024a-0+deb12u1	all	localization	required	3200	GNU Libc Maintainers <debian-glibc@lists.debian.org>	NULL	tzdata	time zone and daylight-saving time data	foreign	false
+apt	2.6.1	amd64	admin	required	4200	APT Development Team <deity@lists.debian.org>	NULL	apt	commandline package manager	NULL	false	false	pkg:deb/debian/apt@2.6.1?arch=amd64&distro=debian-12
+curl	7.88.1-10+deb12u5	amd64	web	optional	500	Debian Curl Maintainers <team+curl@tracker.debian.org>	https://curl.se	curl	command line tool for transferring data with URL syntax	NULL	false	false	pkg:deb/debian/curl@7.88.1-10%2Bdeb12u5?arch=amd64&distro=debian-12
+hello	2.10-3~bpo12+1	amd64	devel	optional	280	Santiago Vila <sanvila@debian.org>	NULL	hello	example package based on GNU hello	NULL	false	false	pkg:deb/debian/hello@2.10-3~bpo12%2B1?arch=amd64&distro=debian-12
+libc6	2.36-9+deb12u1	amd64	libs	required	12000	Debian GLIBC Maintainers <debian-glibc@lists.debian.org>	https://www.gnu.org/software/libc/libc.html	glibc	GNU C Library: Shared libraries	same	true	false	pkg:deb/debian/libc6@2.36-9%2Bdeb12u1?arch=amd64&distro=debian-12
+libgcc-s1	12.2.0-14	amd64	libs	optional	140	Debian GCC Maintainers <debian-gcc@lists.debian.org>	NULL	gcc-12	GCC support library	same	true	false	pkg:deb/debian/libgcc-s1@12.2.0-14?arch=amd64&distro=debian-12
+localtool	1.0	all	NULL	NULL	10	Local Admin <admin@example.org>	NULL	localtool	tool installed from a local .deb	NULL	false	true	pkg:deb/debian/localtool@1.0?arch=all&distro=debian-12
+postfix	3.7.11-0+deb12u1	amd64	mail	optional	4000	LaMont Jones <lamont@debian.org>	NULL	postfix	High-performance mail transport agent	NULL	false	false	pkg:deb/debian/postfix@3.7.11-0%2Bdeb12u1?arch=amd64&distro=debian-12
+python3	3.11.2-1+b1	amd64	python	optional	90	Matthias Klose <doko@debian.org>	NULL	python3-defaults	interactive high-level object-oriented language (default python3 version)	allowed	false	false	pkg:deb/debian/python3@3.11.2-1%2Bb1?arch=amd64&distro=debian-12
+tzdata	2024a-0+deb12u1	all	localization	required	3200	GNU Libc Maintainers <debian-glibc@lists.debian.org>	NULL	tzdata	time zone and daylight-saving time data	foreign	false	false	pkg:deb/debian/tzdata@2024a-0%2Bdeb12u1?arch=all&distro=debian-12
+
+# installed_time comes from the dpkg file list of the package (name.list or name:arch.list)
+query I
+SELECT name FROM apt_packages(root := 'test/data/debian') WHERE installed_time IS NOT NULL ORDER BY name;
+----
+curl
+libc6
 
 # Multi-line fields are joined, ":any" qualifiers and "[arch] <profile>" restrictions are stripped,
 # and each alternative of "a | b" is a row
 query IIIIII
 SELECT * FROM apt_dependencies(root := 'test/data/debian') ORDER BY package, relation, dependency;
 ----
+apt	amd64	Depends	libc6	>= 2.34	false
 curl	amd64	Depends	libc6	>= 2.34	false
 curl	amd64	Depends	mail-transport-agent	NULL	true
 curl	amd64	Depends	postfix	NULL	true
@@ -52,6 +83,7 @@ curl	amd64	Recommends	ca-certificates	NULL	false
 curl	amd64	Suggests	curl-doc	NULL	false
 libc6	amd64	Depends	libgcc-s1	NULL	false
 postfix	amd64	Depends	libc6	>= 2.34	false
+
 
 query IIII
 SELECT * FROM apt_provides(root := 'test/data/debian') ORDER BY package, provides;
@@ -85,18 +117,36 @@ ORDER BY file, type, suite;
 /etc/apt/sources.list.d/vendor.sources	deb822	false	deb	https://vendor.example.org/apt	stable	[main]	[amd64]	NULL	true
 /etc/apt/sources.list.d/vendor.sources	deb822	false	deb-src	https://vendor.example.org/apt	stable	[main]	[amd64]	NULL	true
 
-# Repository metadata comes from InRelease (clearsigned) or Release; "all" packages listed in several
-# architecture indexes (tzdata) are reported once; packages of other architectures (libc6:i386) are ignored
-query IIIIIIIIIII
-SELECT * FROM apt_package_origins(root := 'test/data/debian') ORDER BY name, architecture, site, suite;
+# Repository metadata comes from InRelease (clearsigned) or Release. Index file names are decoded
+# ("%3a" and "%5f"), gzip indexes are read, dates are converted to UTC (backports is "+0100"),
+# and "all" packages listed in several architecture indexes are counted once
+query IIIIIIIIIIIII
+SELECT * FROM apt_repositories(root := 'test/data/debian') ORDER BY site, suite;
 ----
+deb.example.org/debian	stable	bookworm	main	Debian	Debian	[amd64, i386]	10	2024-02-10 10:00:00	NULL	false	false	false
+deb.example.org/debian	stable-backports	bookworm-backports	main	Debian Backports	Debian Backports	[amd64]	2	2024-02-10 10:00:00	NULL	true	true	false
+security.example.org/debian-security	stable-security	bookworm-security	main	Debian	Debian-Security	[amd64]	2	2024-02-10 12:00:00	2024-02-17 12:00:00	false	false	true
+updates.example.org:8080/debian_updates	stable-updates	bookworm-updates	main	Debian	Debian	[amd64]	2	2024-02-11 08:30:00	NULL	false	false	false
+
+# One row per version of an installed package published by a repository: packages of other architectures
+# (libc6:i386) and packages that are not installed (nginx) are ignored
+query IIIIIIIIIII
+SELECT * FROM apt_package_origins(root := 'test/data/debian') ORDER BY name, site, suite, available_version;
+----
+apt	amd64	2.6.1	2.6.1	true	Debian	Debian	stable	bookworm	main	deb.example.org/debian
 curl	amd64	7.88.1-10+deb12u5	7.88.1-10+deb12u4	false	Debian	Debian	stable	bookworm	main	deb.example.org/debian
 curl	amd64	7.88.1-10+deb12u5	7.88.1-10+deb12u5	true	Debian	Debian-Security	stable-security	bookworm-security	main	security.example.org/debian-security
+curl	amd64	7.88.1-10+deb12u5	7.88.1-10+deb12u6	false	Debian	Debian-Security	stable-security	bookworm-security	main	security.example.org/debian-security
+hello	amd64	2.10-3~bpo12+1	2.10-3	false	Debian	Debian	stable	bookworm	main	deb.example.org/debian
+hello	amd64	2.10-3~bpo12+1	2.10-3~bpo12+1	true	Debian Backports	Debian Backports	stable-backports	bookworm-backports	main	deb.example.org/debian
+hello	amd64	2.10-3~bpo12+1	2.10-4~bpo12+1	false	Debian Backports	Debian Backports	stable-backports	bookworm-backports	main	deb.example.org/debian
 libc6	amd64	2.36-9+deb12u1	2.36-9+deb12u1	true	Debian	Debian	stable	bookworm	main	deb.example.org/debian
 libc6	amd64	2.36-9+deb12u1	2.36-9+deb12u1	true	Debian	Debian-Security	stable-security	bookworm-security	main	security.example.org/debian-security
 libgcc-s1	amd64	12.2.0-14	12.2.0-14	true	Debian	Debian	stable	bookworm	main	deb.example.org/debian
+libgcc-s1	amd64	12.2.0-14	12.2.0-15	false	Debian	Debian	stable-updates	bookworm-updates	main	updates.example.org:8080/debian_updates
 postfix	amd64	3.7.11-0+deb12u1	3.7.11-0+deb12u1	true	Debian	Debian	stable	bookworm	main	deb.example.org/debian
 python3	amd64	3.11.2-1+b1	3.11.2-1+b1	true	Debian	Debian	stable	bookworm	main	deb.example.org/debian
+python3	amd64	3.11.2-1+b1	3.12.1-1~bpo12+1	false	Debian Backports	Debian Backports	stable-backports	bookworm-backports	main	deb.example.org/debian
 tzdata	all	2024a-0+deb12u1	2024a-0+deb12u1	true	Debian	Debian	stable	bookworm	main	deb.example.org/debian
 
 # Orphaned packages: unknown to every configured repository
@@ -107,7 +157,47 @@ ORDER BY name;
 ----
 localtool
 
+# Upgrades follow apt's default policy: python3 is not upgraded to the NotAutomatic backports version,
+# hello is upgraded within backports because it was installed from there (2.10-3 from stable sorts above
+# 2.10-3~bpo12+1, but below 2.10-4~bpo12+1)
+query IIIIII
+SELECT * FROM apt_upgradable(root := 'test/data/debian') ORDER BY name;
+----
+curl	amd64	7.88.1-10+deb12u5	7.88.1-10+deb12u6	stable-security	true
+hello	amd64	2.10-3~bpo12+1	2.10-4~bpo12+1	stable-backports	false
+libgcc-s1	amd64	12.2.0-14	12.2.0-15	stable-updates	false
+
+# History reads the rotated .gz logs first, keeps epochs in versions, flags automatic installs, and has no
+# requested_by for unattended upgrades
+query IIIIIIIIIII
+SELECT * FROM apt_history(root := 'test/data/debian');
+----
+2024-01-05 14:30:00	2024-01-05 14:30:10	install	curl	amd64	NULL	7.88.1-10+deb12u4	false	alice	apt install curl	NULL
+2024-01-05 14:30:00	2024-01-05 14:30:10	install	libcurl4	amd64	NULL	7.88.1-10+deb12u4	true	alice	apt install curl	NULL
+2024-01-05 14:30:00	2024-01-05 14:30:10	upgrade	tzdata	all	1:2023c-5	1:2024a-0+deb12u1	false	alice	apt install curl	NULL
+2024-02-12 08:00:00	2024-02-12 08:00:05	upgrade	curl	amd64	7.88.1-10+deb12u4	7.88.1-10+deb12u5	false	NULL	/usr/bin/unattended-upgrade	NULL
+2024-02-13 09:15:00	2024-02-13 09:15:02	install	hello	amd64	NULL	2.10-3~bpo12+1	false	alice	apt install hello/bookworm-backports	NULL
+2024-02-14 10:00:00	2024-02-14 10:00:01	remove	localtool	all	1.0	NULL	false	bob	apt purge oldpkg localtool	Sub-process /usr/bin/dpkg returned an error code (1)
+2024-02-14 10:00:00	2024-02-14 10:00:01	purge	oldpkg	amd64	0.9	NULL	false	bob	apt purge oldpkg localtool	Sub-process /usr/bin/dpkg returned an error code (1)
+
+
+query III
+SELECT apt_version('test/data/debian'), apt_version('test/data/debian/'), apt_version('test/data/does-not-exist');
+----
+2.6.1	2.6.1	NULL
+
+# Compressed indexes that cannot be read must not silently report packages as orphaned
 statement error
-SELECT * FROM apt_packages(root := 42, unknown := 1);
+SELECT * FROM apt_package_origins(root := 'test/data/debian-lz4');
+----
+<REGEX>:.*compressed with "lz4", which is not supported.*
+
+statement error
+SELECT * FROM apt_upgradable(root := 'test/data/debian-lz4');
+----
+<REGEX>:.*compressed with "lz4".*
+
+statement error
+SELECT * FROM apt_packages(root := 'test/data/debian', unknown := 1);
 ----
 <REGEX>:.*Binder Error.*unknown.*

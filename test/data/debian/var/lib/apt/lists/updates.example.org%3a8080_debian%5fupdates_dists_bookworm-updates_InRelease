@@ -1,0 +1,13 @@
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA256
+
+Origin: Debian
+Label: Debian
+Suite: stable-updates
+Codename: bookworm-updates
+Date: Sun, 11 Feb 2024 08:30:00 UTC
+Components: main
+-----BEGIN PGP SIGNATURE-----
+
+iQIzBAEBCAAdFiEE
+-----END PGP SIGNATURE-----

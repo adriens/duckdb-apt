@@ -28,3 +28,11 @@ Version: 2024a-0+deb12u1
 Package: nginx
 Architecture: amd64
 Version: 1.22.1-9
+
+Package: apt
+Architecture: amd64
+Version: 2.6.1
+
+Package: hello
+Architecture: amd64
+Version: 2.10-3

@@ -1,0 +1,115 @@
+#
+# The distribution pipeline builds and tests in a manylinux (RPM-based) container, where dpkg and apt do not exist.
+# This workflow takes the binaries it built and runs them where they matter: real apt-based distributions.
+#
+name: apt Distributions
+on:
+  workflow_run:
+    workflows: ["Main Extension Distribution Pipeline"]
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: write
+
+env:
+  ARTIFACT: apt-v2.0.0-extension-linux_amd64
+
+jobs:
+  test:
+    name: Test on ${{ matrix.image }}
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-24.04
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ['debian:12', 'debian:13', 'ubuntu:22.04', 'ubuntu:24.04']
+    steps:
+      - name: Refresh package lists
+        run: apt-get update && apt-get install -y --no-install-recommends ca-certificates git
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT }}
+          path: artifact
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # The test bundle holds a duckdb shell and the unittest runner with the extension built in
+      - name: Extract the test bundle
+        run: tar xzf artifact/test-support/*/test-support.tar.gz
+
+      - name: Run the SQL tests, including the host checks
+        run: APT_HOST_TESTS=1 release/test/unittest --test-dir . "test/*"
+
+      - name: Compare apt_upgradable() with apt
+        run: |
+          apt list --upgradable 2>/dev/null | grep upgradable | cut -d/ -f1 | sort -u > apt.txt
+          release/duckdb -noheader -list -c "SELECT DISTINCT name FROM apt_upgradable() ORDER BY name" | sort -u > extension.txt
+          echo "apt: $(wc -l < apt.txt) upgradable packages, extension: $(wc -l < extension.txt)"
+          diff apt.txt extension.txt
+
+  report:
+    name: Render the security reports
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT }}
+          path: artifact
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract the test bundle
+        run: tar xzf artifact/test-support/*/test-support.tar.gz
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python dependencies
+        run: pip install -r docs/requirements.txt
+
+      - uses: quarto-dev/quarto-actions/setup@v2
+        with:
+          tinytex: true
+
+      - name: Refresh package lists
+        run: sudo apt-get update
+
+      # sample: the fake Debian system of the tests, runner: this GitHub runner (a public Ubuntu image)
+      - name: Render the reports
+        working-directory: docs
+        env:
+          DUCKDB: ${{ github.workspace }}/release/duckdb
+          APT_EXTENSION: ${{ github.workspace }}/artifact/apt.duckdb_extension
+          QUARTO_PYTHON: python3
+        run: |
+          APT_ROOT=${{ github.workspace }}/test/data/debian quarto render apt-security-report.qmd --to pdf
+          mv apt-security-report.pdf apt-security-report-sample.pdf
+          quarto render apt-security-report.qmd --to pdf
+          mv apt-security-report.pdf apt-security-report-github-runner.pdf
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apt-security-reports
+          path: docs/apt-security-report-*.pdf
+
+      - name: Attach the reports to the release
+        if: github.event.workflow_run.event == 'push' && startsWith(github.event.workflow_run.head_branch, 'v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          gh release view "$TAG" > /dev/null 2>&1 || gh release create "$TAG" --verify-tag --generate-notes
+          gh release upload "$TAG" docs/apt-security-report-*.pdf --clobber

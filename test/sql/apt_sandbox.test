@@ -1,0 +1,42 @@
+# name: test/sql/apt_sandbox.test
+# description: the functions read files through DuckDB's file system, so its access restrictions apply
+# group: [sql]
+
+require apt
+
+statement ok
+SET allowed_directories = ['test/data/debian/'];
+
+statement ok
+SET enable_external_access = false;
+
+# Allowed directories stay readable
+query I
+SELECT COUNT(*) > 0 FROM apt_packages(root := 'test/data/debian');
+----
+true
+
+statement error
+SELECT * FROM apt_packages();
+----
+<REGEX>:.*Permission Error.*
+
+statement error
+SELECT * FROM apt_sources();
+----
+<REGEX>:.*Permission Error.*
+
+statement error
+SELECT * FROM apt_package_origins();
+----
+<REGEX>:.*Permission Error.*
+
+statement error
+SELECT * FROM apt_history();
+----
+<REGEX>:.*Permission Error.*
+
+statement error
+SELECT apt_version();
+----
+<REGEX>:.*Permission Error.*

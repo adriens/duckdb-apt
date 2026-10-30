@@ -95,3 +95,24 @@ Maintainer: Someone <someone@example.org>
 Architecture: amd64
 Version: 0.9
 Description: removed package with leftover configuration files
+
+Package: apt
+Status: install ok installed
+Priority: required
+Section: admin
+Installed-Size: 4200
+Maintainer: APT Development Team <deity@lists.debian.org>
+Architecture: amd64
+Version: 2.6.1
+Depends: libc6 (>= 2.34)
+Description: commandline package manager
+
+Package: hello
+Status: install ok installed
+Priority: optional
+Section: devel
+Installed-Size: 280
+Maintainer: Santiago Vila <sanvila@debian.org>
+Architecture: amd64
+Version: 2.10-3~bpo12+1
+Description: example package based on GNU hello

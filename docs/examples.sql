@@ -156,19 +156,35 @@ WHERE o.is_installed_version AND o.origin = 'Ubuntu' AND o.component = 'universe
 ORDER BY o.name;
 
 -------------------------------------------------------------------------------
--- Upgrades (as of the last `apt update`)
+-- Repositories and upgrades (as of the last `apt update`)
 -------------------------------------------------------------------------------
 
--- Pending upgrades and the repository they come from
-SELECT name, current_version, new_version, repository
+-- Downloaded repository indexes, oldest first, with their validity
+SELECT site, suite, component, packages, date, valid_until, is_security
+FROM apt_repositories()
+ORDER BY date;
+
+-- Indexes past their Valid-Until date: apt refuses them, the system runs on old metadata
+SELECT site, suite, valid_until
+FROM apt_repositories()
+WHERE valid_until < now()::TIMESTAMP;
+
+-- Pending upgrades and the repositories they come from
+SELECT name, current_version, new_version, repository, is_security
 FROM apt_upgradable()
 ORDER BY name;
 
 -- Pending security upgrades
 SELECT name, current_version, new_version, repository
 FROM apt_upgradable()
-WHERE repository LIKE '%-security%'
+WHERE is_security
 ORDER BY name;
+
+-- Held packages (apt-mark hold) and the update they are missing
+SELECT p.name, p.version, u.new_version, u.is_security
+FROM apt_packages() p
+LEFT JOIN apt_upgradable() u USING (name, architecture)
+WHERE p.held;
 
 -- Share of installed packages with an upgrade available
 SELECT count(u.name) AS upgradable, count(*) AS installed,
@@ -176,12 +192,52 @@ SELECT count(u.name) AS upgradable, count(*) AS installed,
 FROM apt_packages() p
 LEFT JOIN apt_upgradable() u USING (name, architecture);
 
+-- Debian versions compared like dpkg --compare-versions (plain string comparison gets "1.10" < "1.9" wrong):
+-- every newer version published for an installed package, in any repository, including NotAutomatic ones
+SELECT name, installed_version, available_version, suite
+FROM apt_package_origins()
+WHERE apt_version_compare(available_version, installed_version) > 0
+ORDER BY name;
+
+-------------------------------------------------------------------------------
+-- History
+-------------------------------------------------------------------------------
+
+-- Latest changes, and who requested them (NULL: automatic, e.g. unattended-upgrades)
+SELECT start_time, action, package, old_version, new_version, requested_by
+FROM apt_history()
+ORDER BY start_time DESC
+LIMIT 20;
+
+-- Changes per user and action
+SELECT coalesce(requested_by, '(automatic)') AS requested_by, action, count(*) AS changes
+FROM apt_history()
+GROUP BY ALL
+ORDER BY changes DESC;
+
+-- Failed transactions
+SELECT DISTINCT start_time, commandline, error
+FROM apt_history()
+WHERE error IS NOT NULL;
+
+-- When was each installed package last installed or upgraded?
+SELECT name, version, installed_time
+FROM apt_packages()
+ORDER BY installed_time DESC
+LIMIT 20;
+
 -------------------------------------------------------------------------------
 -- Inventory snapshots
 -------------------------------------------------------------------------------
 
 -- Export the inventory, e.g. to compare two machines
 COPY (SELECT name, version, architecture, auto_installed FROM apt_packages()) TO 'apt-inventory.parquet';
+
+-- Package URLs, for vulnerability scanners (OSV, Grype, Dependency-Track)
+COPY (SELECT purl FROM apt_packages()) TO 'apt-purls.csv';
+
+-- Audit another system, e.g. a mounted disk image or a container filesystem
+SELECT count(*) FROM apt_packages(root := '/');
 
 -- Compare with another machine's export:
 -- SELECT name, a.version AS this_machine, b.version AS other_machine

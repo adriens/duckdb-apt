@@ -1,0 +1,53 @@
+# name: test/sql/apt_versions.test
+# description: test apt_version_compare() against the results of dpkg --compare-versions
+# group: [sql]
+
+require apt
+
+statement ok
+CREATE TABLE dpkg_results AS SELECT * FROM (VALUES
+    ('1.0', '1.0', 0),
+    ('1.0', '1.0-0', 0),
+    ('1:1.0', '2.0', 1),
+    ('0:1.0', '1.0', 0),
+    ('1.0~rc1', '1.0', -1),
+    ('1.0~~', '1.0~', -1),
+    ('1.0', '1.0+b1', -1),
+    ('1.10', '1.9', 1),
+    ('1.0a', '1.0', 1),
+    ('1.0', '1.0.', -1),
+    ('2.36-9+deb12u4', '2.36-9+deb12u5', -1),
+    ('2.10-3~bpo12+1', '2.10-3', -1),
+    ('1.0-1', '1.0-1ubuntu1', -1),
+    ('8:7.1.2.18+dfsg1-1ubuntu0.1~esm3', '8:7.1.2.18+dfsg1-1ubuntu0.1~esm4', -1),
+    ('1.2.3-4-5', '1.2.3-4', 1),
+    ('0.9', '0.10', -1),
+    ('1.0-1', '1.0-01', 0),
+    ('2:0', '1:99', 1),
+    ('1.0~', '1.0', -1),
+    ('1.0+', '1.0', 1),
+    ('a', '1', 1),
+    ('1.0-1~', '1.0-1', -1)
+) t(a, b, dpkg);
+
+# Same results as dpkg --compare-versions
+query I
+SELECT count(*) FROM dpkg_results WHERE apt_version_compare(a, b) IS DISTINCT FROM dpkg;
+----
+0
+
+# The comparison is antisymmetric
+query I
+SELECT count(*) FROM dpkg_results WHERE apt_version_compare(b, a) IS DISTINCT FROM -dpkg;
+----
+0
+
+query III
+SELECT apt_version_compare('1:1.0', '2.0'), apt_version_compare('1.0~rc1', '1.0'), apt_version_compare('1.0', '1.0-0');
+----
+1	-1	0
+
+query II
+SELECT apt_version_compare(NULL, '1.0'), apt_version_compare('1.0', NULL);
+----
+NULL	NULL

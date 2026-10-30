@@ -110,7 +110,7 @@ WHERE p.name IS NULL OR p.version <> o.installed_version
 
 query I
 SELECT COUNT(*) >= 0 FROM (
-    SELECT name, repository, current_version, new_version, architecture FROM apt_upgradable() LIMIT 1
+    SELECT name, architecture, current_version, new_version, repository, is_security FROM apt_upgradable() LIMIT 1
 );
 ----
 true

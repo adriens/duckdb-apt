@@ -9,7 +9,14 @@ set(LOADABLE_EXTENSION_NAME ${TARGET_NAME}_loadable_extension)
 project(${TARGET_NAME})
 include_directories(src/include)
 
-set(EXTENSION_SOURCES src/apt_extension.cpp)
+set(EXTENSION_SOURCES
+    src/apt_extension.cpp
+    src/apt_common.cpp
+    src/apt_history.cpp
+    src/apt_indexes.cpp
+    src/apt_sources.cpp
+    src/apt_versions.cpp
+    src/dpkg_status.cpp)
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})

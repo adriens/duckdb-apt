@@ -1,0 +1,63 @@
+# name: test/sql/apt_host.test
+# description: strict checks against the host, run on apt-based distributions after apt-get update
+# group: [sql]
+
+# Enabled by APT_HOST_TESTS=1, which CI sets on Debian and Ubuntu containers
+
+require apt
+
+require-env APT_HOST_TESTS
+
+query I
+SELECT COUNT(*) > 0 FROM apt_packages();
+----
+true
+
+query I
+SELECT apt_version() IS NOT NULL;
+----
+true
+
+# Every installed package has a name, a version, an architecture and a package URL
+query I
+SELECT COUNT(*) FROM apt_packages() WHERE name IS NULL OR version IS NULL OR architecture IS NULL OR purl IS NULL;
+----
+0
+
+# dpkg keeps a file list for every installed package
+query I
+SELECT COUNT(*) FROM apt_packages() WHERE installed_time IS NULL;
+----
+0
+
+# dpkg guarantees that every hard dependency of an installed package is satisfied
+query I
+SELECT COUNT(*) FROM apt_dependencies()
+WHERE relation IN ('Depends', 'Pre-Depends') AND NOT alternative
+  AND dependency NOT IN (SELECT name FROM apt_packages())
+  AND dependency NOT IN (SELECT provides FROM apt_provides());
+----
+0
+
+query I
+SELECT COUNT(*) > 0 FROM apt_sources() WHERE enabled;
+----
+true
+
+# After apt-get update, every enabled repository has its indexes, with a release date
+query I
+SELECT COUNT(*) > 0 AND COUNT(*) FILTER (WHERE date IS NULL) = 0 FROM apt_repositories();
+----
+true
+
+# On a stock image, the base system comes from the distribution repositories
+query I
+SELECT COUNT(DISTINCT name) * 2 > (SELECT COUNT(*) FROM apt_packages()) FROM apt_package_origins();
+----
+true
+
+# A pending update is always newer than the installed version
+query I
+SELECT COUNT(*) FROM apt_upgradable() WHERE apt_version_compare(new_version, current_version) <= 0;
+----
+0

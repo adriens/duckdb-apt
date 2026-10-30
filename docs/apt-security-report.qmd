@@ -118,6 +118,7 @@ LOAD_APT = f"LOAD '{APT_EXTENSION}';" if APT_EXTENSION else "INSTALL apt FROM co
 # Audit another system (mounted disk image, container filesystem) instead of this machine
 APT_ROOT = os.environ.get("APT_ROOT", "").rstrip("/")
 ROOT = f"root := '{APT_ROOT}'" if APT_ROOT else ""
+HOST = socket.gethostname() if not APT_ROOT else f"\\nolinkurl{{{os.path.normpath(APT_ROOT)}}} (offline audit)"
 
 
 def query_apt(sql):
@@ -251,12 +252,36 @@ universe = query_apt(f"""
 """)["packages"][0]
 esm_apps = bool(len(enabled_sources)) and enabled_sources["uri"].str.contains("esm.ubuntu.com/apps").any()
 
-# apt_upgradable() asks the local apt, so it does not apply to another root
-upgradable = query_apt("SELECT * FROM apt_upgradable() ORDER BY name") if not APT_ROOT else pd.DataFrame()
-if len(upgradable):
-    security_upgrades = upgradable[upgradable["repository"].str.contains("-security")]
+upgradable = query_apt(f"""
+    SELECT u.*, p.held
+    FROM apt_upgradable({ROOT}) u JOIN apt_packages({ROOT}) p USING (name, architecture)
+    ORDER BY name
+""")
+if upgradable.empty:
+    upgradable = pd.DataFrame(columns=["name", "architecture", "current_version", "new_version", "repository",
+                                       "is_security", "held"])
+security_upgrades = upgradable[upgradable["is_security"].astype(bool)]
+held = packages[packages["held"]]
+held_with_updates = upgradable[upgradable["held"].astype(bool)]
+
+# Indexes past their Valid-Until date: apt refuses to refresh them, so the system is stuck with old metadata
+# (a broken or frozen mirror, or an attacker replaying old metadata to hide updates)
+apt_repositories = query_apt(f"SELECT * FROM apt_repositories({ROOT}) ORDER BY site, suite")
+expired = query_apt(f"""
+    SELECT site, suite, valid_until
+    FROM apt_repositories({ROOT})
+    WHERE valid_until < now()::TIMESTAMP
+    ORDER BY valid_until
+""")
+
+# History, over the 30 days before its last entry
+history = query_apt(f"SELECT * FROM apt_history({ROOT}) ORDER BY start_time")
+if len(history):
+    history["start_time"] = pd.to_datetime(history["start_time"])
+    recent = history[history["start_time"] > history["start_time"].max() - pd.Timedelta(days=30)]
 else:
-    upgradable = security_upgrades = pd.DataFrame(columns=["name", "repository", "current_version", "new_version", "architecture"])
+    recent = history
+failed = recent[recent["error"].notna()] if len(recent) else recent
 
 release_files = glob.glob(f"{APT_ROOT}/var/lib/apt/lists/*Release")
 last_update = datetime.fromtimestamp(max(os.path.getmtime(f) for f in release_files)) if release_files else None
@@ -292,6 +317,12 @@ if len(orphans):
 if len(security_upgrades):
     findings.append(("High", "Security updates pending", len(security_upgrades),
                      "Apply them (apt upgrade) and check that unattended-upgrades is active"))
+if len(held_with_updates):
+    findings.append(("High", "Held packages (apt-mark hold) missing available updates", len(held_with_updates),
+                     "Review why each package is held, and release the hold for security fixes"))
+if len(expired):
+    findings.append(("High", "Repository indexes past their Valid-Until date", len(expired),
+                     "Run apt update and fix the mirror: expired metadata can hide security updates"))
 if days_since_update is not None and days_since_update > 7:
     findings.append(("High", f"Package lists not refreshed for {days_since_update} days", 1,
                      "Run apt update regularly: every other finding depends on fresh lists"))
@@ -309,6 +340,12 @@ if len(http_sources):
 if len(disabled_sources):
     findings.append(("Low", "Disabled repositories (their packages no longer get updates)", len(disabled_sources),
                      "Remove them, or re-enable them if their packages are still installed"))
+if len(held) > len(held_with_updates):
+    findings.append(("Low", "Held packages (apt-mark hold)", len(held) - len(held_with_updates),
+                     "Document why they are held: they will silently miss future updates"))
+if len(failed):
+    findings.append(("Low", "Failed apt transactions in the last 30 days of history", failed["start_time"].nunique(),
+                     "Check that the packages involved are in a consistent state (dpkg --audit)"))
 if universe and not esm_apps:
     findings.append(("Low", "Packages from Ubuntu universe (community maintained)", int(universe),
                      "Enable Ubuntu Pro ESM Apps for security coverage of universe"))
@@ -332,12 +369,12 @@ if os.path.exists(os_release_path):
 system = os_release.get("PRETTY_NAME", "unknown").strip('"')
 
 print(f"This report covers **{len(packages):,} installed packages** on "
-      f"**{socket.gethostname() if not APT_ROOT else APT_ROOT}** ({system}), "
+      f"**{HOST}** ({system}), "
       f"generated on {datetime.now():%Y-%m-%d}.\n")
 
 counts = findings.groupby("Severity")["Count"].size().reindex(SEVERITY_ORDER, fill_value=0)
 if len(findings) == 0:
-    print("\\textcolor{sevok}{\\faIcon{check-circle}}~**No finding**: the installed software is up to date and "
+    print("\\textcolor{sevok}{\\faIcon{check-circle}} **No finding**: the installed software is up to date and "
           "comes from trusted, maintained repositories.\n")
 else:
     summary = ", ".join(f"{n} {level.lower()}" for level, n in counts.items() if n)
@@ -364,7 +401,8 @@ kpis = pd.DataFrame([
     ("Third-party packages installed on purpose", f"{len(third_party):,}"),
     ("Enabled repositories (type x URI x suite)", f"{len(enabled_sources):,}"),
     ("Packages apt never updates (orphaned)", f"{len(orphans):,}"),
-    ("Pending updates (of which security)", f"{len(upgradable):,} ({len(security_upgrades):,})" if not APT_ROOT else "not checked"),
+    ("Pending updates (of which security)", f"{len(upgradable):,} ({len(security_upgrades):,})"),
+    ("Held packages", f"{len(held):,}"),
     ("Last package list refresh", f"{last_update:%Y-%m-%d %H:%M} ({days_since_update} days ago)" if last_update else "never"),
 ], columns=["Indicator", "Value"])
 print(kpis.to_markdown(index=False))
@@ -378,18 +416,18 @@ The **apt** extension for DuckDB exposes the state of the apt/dpkg package manag
 
 - **Installed packages**, from `/var/lib/dpkg/status` and `/var/lib/apt/extended_states`: `apt_packages()`, `apt_dependencies()`, `apt_provides()`
 - **Configured repositories**, from `/etc/apt/sources.list` and `/etc/apt/sources.list.d/`: `apt_sources()`
-- **Package origins**, from the indexes downloaded by `apt update` in `/var/lib/apt/lists/`: `apt_package_origins()`
-- **Pending updates**, from `apt list --upgradable`: `apt_upgradable()`
+- **Repositories, package origins and pending updates**, from the indexes downloaded by `apt update` in `/var/lib/apt/lists/`: `apt_repositories()`, `apt_package_origins()`, `apt_upgradable()`
+- **Change history**, from `/var/log/apt/history.log` and its rotated files: `apt_history()`
 
-Origins and pending updates are only as fresh as the last `apt update`. Software installed outside apt (snaps, Flatpaks, language package managers, manual installs in `/opt`) is **out of scope**.
+Repositories, origins and pending updates are only as fresh as the last `apt update`. Software installed outside apt (snaps, Flatpaks, language package managers, manual installs in `/opt`) is **out of scope**.
 
 ```{python}
 #| echo: false
 #| output: asis
 
-version = query_apt("SELECT apt_version() AS version")["version"][0] if not APT_ROOT else None
+version = query_apt(f"SELECT apt_version('{APT_ROOT or '/'}') AS version")["version"][0]
 facts = pd.DataFrame([
-    ("Host", socket.gethostname() if not APT_ROOT else f"{APT_ROOT} (offline audit)"),
+    ("Host", HOST),
     ("Operating system", system),
     ("Kernel", platform.release() if not APT_ROOT else "n/a"),
     ("apt version", version or "n/a"),
@@ -417,14 +455,15 @@ functions = [
     ("apt_provides()", "Which package provides a virtual package?", "`apt-cache showpkg`"),
     ("apt_sources()", "Which repositories are configured, and how are they trusted?",
      "reading `sources.list.d` by hand"),
+    ("apt_repositories()", "Which repositories were downloaded, and how fresh are they?",
+     "`apt-cache policy`, reading Release files"),
     ("apt_package_origins()", "Which repository does each package come from?", "`apt-cache policy`, per package"),
-    ("apt_upgradable()", "Which updates are pending?", "`apt list --upgradable`"),
+    ("apt_upgradable()", "Which updates are pending, and which are security fixes?", "`apt list --upgradable`"),
+    ("apt_history()", "Who installed, upgraded or removed what, and when?", "`zgrep` in `/var/log/apt`"),
 ]
 rows = []
 for function, question, replaces in functions:
-    if APT_ROOT and function == "apt_upgradable()":
-        continue
-    call = function.replace("()", f"({ROOT})") if function != "apt_upgradable()" else function
+    call = function.replace("()", f"({ROOT})")
     start = time.perf_counter()
     count = query_apt(f"SELECT count(*) AS n FROM {call}")["n"][0]
     elapsed = time.perf_counter() - start
@@ -432,9 +471,12 @@ for function, question, replaces in functions:
 
 print_table(pd.DataFrame(rows, columns=["Function", "Answers", "Replaces", "Rows here", "Time"]),
             widths=[24, 34, 22, 10, 10])
-index_mb = sum(os.path.getsize(f) for f in glob.glob(f"{APT_ROOT}/var/lib/apt/lists/*_Packages")) / 1024 / 1024
-print(f"`apt_package_origins()` cross-checks every installed package against **{index_mb:,.0f} MB** of repository "
+index_mb = sum(os.path.getsize(f) for f in glob.glob(f"{APT_ROOT}/var/lib/apt/lists/*_Packages*")) / 1024 / 1024
+print(f"`apt_package_origins()` cross-checks every installed package against **{index_mb:,.1f} MB** of repository "
       "indexes in a single query, where `apt-cache policy` answers for one package at a time.\n")
+print("`apt_version_compare(a, b)` compares Debian versions exactly like `dpkg --compare-versions`, and every "
+      "function reads files through DuckDB, so `SET enable_external_access = false` and `allowed_directories` "
+      "restrict it like any other file access.\n")
 ```
 
 ## \faIcon{play} First Steps
@@ -588,10 +630,9 @@ show(not_in_repo.rename(columns={"name": "Package", "installed_version": "Instal
 if last_update:
     print(f"Package lists were last refreshed on **{last_update:%Y-%m-%d %H:%M}** "
           f"({days_since_update} days before this report).\n")
-if APT_ROOT:
-    print("Pending updates are not checked for an offline audit.\n")
-else:
-    print(f"**{len(upgradable)} updates** are pending, **{len(security_upgrades)}** of them from a security repository.\n")
+print(f"**{len(upgradable)} updates** are pending, **{len(security_upgrades)}** of them from a security repository. "
+      "They are computed from the downloaded indexes with apt's default policy; pins from `/etc/apt/preferences` "
+      "are not applied.\n")
 ```
 
 ## \faIcon{shield-alt} Pending Security Updates
@@ -605,19 +646,125 @@ show(security_upgrades[["name", "current_version", "new_version", "repository"]]
      "*None: no security update is pending.*")
 ```
 
+## \faIcon{hand-paper} Held Packages
+
+Packages held with `apt-mark hold` are skipped by every upgrade, security fixes included.
+
+```{python}
+#| echo: false
+#| output: asis
+
+held_table = held[["name", "version"]].merge(upgradable[["name", "new_version"]], on="name", how="left")
+show(held_table.fillna({"new_version": "-"})
+     .rename(columns={"name": "Package", "version": "Installed", "new_version": "Update being missed"}),
+     "*None: no package is held.*")
+```
+
+## \faIcon{clock} Repository Freshness
+
+Repositories republish their index (the `Release` file) when their packages change, so an old date alone is not a problem: a repository with nothing new to publish keeps its index. What protects against a stale mirror, or an attacker replaying old metadata to hide updates, is the `Valid-Until` date that some repositories (such as Debian's security archive) put in their index: apt refuses an index past it. Repositories without one, like Ubuntu's, cannot be checked this way.
+
+```{python}
+#| echo: false
+#| output: asis
+
+if len(apt_repositories):
+    now = pd.Timestamp.now(tz="UTC").tz_localize(None)
+    fresh = apt_repositories.assign(date=pd.to_datetime(apt_repositories["date"]),
+                                    valid_until=pd.to_datetime(apt_repositories["valid_until"]))
+    fresh = fresh.sort_values("date")
+
+    def validity(valid_until):
+        if pd.isna(valid_until):
+            return "\\textcolor{gray}{not set}"
+        text = f"{valid_until:%Y-%m-%d}"
+        return f"\\textcolor{{sevcritical}}{{{text} expired}}" if valid_until < now else text
+
+    print_table(pd.DataFrame({
+        "Repository": fresh["site"].map(lambda s: f"\\nolinkurl{{{s}}}"),
+        "Suite": fresh["suite"].fillna(""),
+        "Component": fresh["component"].fillna(""),
+        "Published": fresh["date"].dt.strftime("%Y-%m-%d").fillna("unknown"),
+        "Valid until": fresh["valid_until"].map(validity),
+        "Security": fresh["is_security"].map({True: "\\textcolor{sevok}{\\faIcon{shield-alt}} yes", False: ""}),
+    }), widths=[31, 20, 12, 12, 15, 10])
+else:
+    print("*No repository index: apt update has never run.*")
+```
+
 ## \faIcon{users} Community-Maintained Packages
 
 ```{python}
 #| echo: false
 #| output: asis
 
-if universe:
+if os_release.get("ID", "").strip('"') != "ubuntu":
+    print("*Not applicable: this system does not use Ubuntu's archive.*")
+elif universe:
     coverage = ("Ubuntu Pro **ESM Apps is enabled**, which extends security maintenance to universe."
                 if esm_apps else "**ESM Apps is not enabled**: security fixes for these packages depend on community effort.")
     print(f"**{universe:,} installed packages** come from Ubuntu's *universe* component, maintained by the community "
           f"rather than by Canonical. {coverage}")
 else:
     print("*No package from Ubuntu universe.*")
+```
+
+# \faIcon{history} Change History
+
+```{python}
+#| echo: false
+#| output: asis
+
+if history.empty:
+    print("*No apt history: /var/log/apt/history.log is empty or missing.*")
+else:
+    automatic = history["requested_by"].isna().mean()
+    print(f"apt recorded **{len(history):,} package changes** between {history['start_time'].min():%Y-%m-%d} and "
+          f"{history['start_time'].max():%Y-%m-%d}. **{automatic:.0%}** of them were automatic (unattended-upgrades "
+          "and other changes without a requesting user). The tables below cover the last 30 days of history.\n")
+```
+
+## \faIcon{chart-bar} Recent Activity
+
+```{python}
+#| echo: false
+#| fig-width: 8
+
+if len(recent):
+    by_action = recent.groupby("action").size().sort_values(ascending=False)
+    hbar(by_action.index.tolist(), by_action.values.tolist(), "Package changes in the last 30 days of history",
+         "Package changes")
+```
+
+## \faIcon{user-check} Changes Requested by Users
+
+Software installed or removed by hand bypasses the automatic update policy: each change should be traceable to a need.
+
+```{python}
+#| echo: false
+#| output: asis
+
+if len(recent):
+    manual_changes = (recent[recent["requested_by"].notna() & recent["action"].isin(["install", "remove", "purge"])
+                             & ~recent["automatic"].astype(bool)]
+                      .sort_values("start_time", ascending=False).head(25))
+    show(pd.DataFrame({
+        "Date": manual_changes["start_time"].dt.strftime("%Y-%m-%d %H:%M"),
+        "User": manual_changes["requested_by"],
+        "Action": manual_changes["action"],
+        "Package": manual_changes["package"],
+        "Version": manual_changes["new_version"].fillna(manual_changes["old_version"]),
+    }), "*None in the last 30 days of history.*")
+```
+
+```{python}
+#| echo: false
+#| output: asis
+
+if len(failed):
+    print("**Failed transactions** (they can leave packages half-configured):\n")
+    show(failed.drop_duplicates("start_time")[["start_time", "commandline", "error"]]
+         .rename(columns={"start_time": "Date", "commandline": "Command", "error": "Error"}))
 ```
 
 # \faIcon{project-diagram} Dependency Risk
@@ -653,6 +800,7 @@ graph.add_edges_from(edges[["package", "dependency"]].itertuples(index=False, na
 #| fig-width: 8
 
 dependents = pd.Series(dict(graph.in_degree())).sort_values(ascending=False).head(15)
+dependents = dependents[dependents > 0]
 hbar(dependents.index.tolist(), dependents.values.tolist(),
      "Packages with the most direct dependents (top 15)", "Installed packages depending on it directly")
 ```
@@ -668,6 +816,7 @@ Direct dependents understate the reach of low-level libraries. The number of pac
 candidates = pd.Series(dict(graph.in_degree())).sort_values(ascending=False).head(40).index
 reach = pd.Series({node: len(nx.ancestors(graph, node)) for node in candidates})
 reach = reach.sort_values(ascending=False).head(15)
+reach = reach[reach > 0]
 hbar(reach.index.tolist(), reach.values.tolist(),
      "Packages with the largest blast radius (top 15)", "Installed packages depending on it, directly or transitively")
 ```
@@ -679,7 +828,7 @@ Graph data science ranks packages beyond simple counts:
 - **PageRank** scores a package by how much of the system depends on it, weighting dependents by their own importance: the targets of choice for a supply chain attack.
 - **Betweenness centrality** measures how often a package lies on the dependency paths between other packages: the bridges through which a compromise propagates.
 
-The network shows the 25 packages with the largest blast radius and the dependencies between them. Node size is the number of direct dependents, color the betweenness centrality.
+The network shows the (up to 25) packages with the largest blast radius and the dependencies between them. Node size is the number of direct dependents, color the betweenness centrality.
 
 ```{python}
 #| echo: false
@@ -715,7 +864,7 @@ for node, (x, y) in pos.items():
 colorbar = plt.colorbar(nodes, ax=ax, fraction=0.035, pad=0.02)
 colorbar.set_label("Betweenness centrality", color=MUTED)
 colorbar.outline.set_visible(False)
-ax.set_title("Core dependency network: the 25 packages with the largest blast radius", loc="left", pad=12)
+ax.set_title(f"Core dependency network: the {len(core)} packages with the largest blast radius", loc="left", pad=12)
 ax.axis("off")
 plt.tight_layout()
 plt.show()
@@ -863,7 +1012,14 @@ SELECT
     new_version,
     repository
 FROM apt_upgradable()
-WHERE repository LIKE '%-security%';
+WHERE is_security;
+
+-- Inventory as package URLs, for
+-- vulnerability scanners (OSV, Grype,
+-- Dependency-Track)
+COPY (
+    SELECT purl FROM apt_packages()
+) TO 'inventory-purls.csv';
 ```
 
 More queries in [docs/examples.sql](https://github.com/adriens/duckdb-apt/blob/main/docs/examples.sql).

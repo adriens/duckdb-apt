@@ -5,3 +5,7 @@ Version: 7.88.1-10+deb12u5
 Package: libc6
 Architecture: amd64
 Version: 2.36-9+deb12u1
+
+Package: curl
+Architecture: amd64
+Version: 7.88.1-10+deb12u6
