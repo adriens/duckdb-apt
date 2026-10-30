@@ -1,0 +1,61 @@
+# name: test/sql/apt.test
+# description: test apt extension
+# group: [sql]
+
+# Before we load the extension, this will fail
+statement error
+SELECT * FROM apt_packages();
+----
+Catalog Error: Table Function with name apt_packages does not exist!
+
+# Require statement will ensure this test is run with this extension loaded
+require apt
+
+# Results depend on the host: 0 rows on systems without dpkg, many on Debian-based ones
+query I
+SELECT COUNT(*) >= 0 FROM apt_packages();
+----
+true
+
+# Check the column structure
+query I
+SELECT COUNT(*) >= 0 FROM (
+    SELECT name, version, architecture, section, priority, installed_size_kb, maintainer, homepage, source,
+           description, multi_arch, auto_installed
+    FROM apt_packages()
+    LIMIT 1
+);
+----
+true
+
+# Installed packages always have a name and a version
+query I
+SELECT COUNT(*) FROM apt_packages() WHERE name IS NULL OR version IS NULL;
+----
+0
+
+# Every dependency row refers to an installed package
+query I
+SELECT COUNT(*) FROM apt_dependencies() d
+WHERE d.package NOT IN (SELECT name FROM apt_packages());
+----
+0
+
+query I
+SELECT COUNT(*) >= 0 FROM (
+    SELECT package, architecture, relation, dependency, version_constraint, alternative FROM apt_dependencies() LIMIT 1
+);
+----
+true
+
+query I
+SELECT COUNT(*) >= 0 FROM (
+    SELECT name, repository, current_version, new_version, architecture FROM apt_upgradable() LIMIT 1
+);
+----
+true
+
+query I
+SELECT typeof(apt_version());
+----
+VARCHAR
