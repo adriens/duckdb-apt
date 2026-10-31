@@ -101,6 +101,7 @@ import json
 import os
 import platform
 import socket
+import sys
 import subprocess
 from datetime import datetime
 
@@ -122,8 +123,8 @@ HOST = socket.gethostname() if not APT_ROOT else f"\\nolinkurl{{{os.path.normpat
 
 
 def query_apt(sql):
-    # AI_AGENT switches the DuckDB CLI to its agent output mode, which is not JSON
-    env = {key: value for key, value in os.environ.items() if key != "AI_AGENT"}
+    # AI_AGENT and CLAUDECODE switch the DuckDB CLI to its agent output mode, which is not JSON
+    env = {key: value for key, value in os.environ.items() if key not in ("AI_AGENT", "CLAUDECODE")}
     result = subprocess.run(
         [DUCKDB, "-unsigned", "-json", ":memory:", "-c", f"{LOAD_APT} {sql}"],
         capture_output=True, text=True, env=env,
@@ -140,7 +141,7 @@ DATABASE = os.environ.get("APT_DATABASE", "apt-security-report.duckdb")
 
 
 def build_database():
-    env = {key: value for key, value in os.environ.items() if key != "AI_AGENT"}
+    env = {key: value for key, value in os.environ.items() if key not in ("AI_AGENT", "CLAUDECODE")}
     command = [DUCKDB, "-unsigned", DATABASE, "-cmd", LOAD_APT]
     if APT_ROOT:
         command += ["-cmd", f"SET VARIABLE apt_root = '{APT_ROOT}'"]
@@ -150,7 +151,7 @@ def build_database():
 
 
 def query_db(sql):
-    env = {key: value for key, value in os.environ.items() if key != "AI_AGENT"}
+    env = {key: value for key, value in os.environ.items() if key not in ("AI_AGENT", "CLAUDECODE")}
 
     def run(statement):
         result = subprocess.run([DUCKDB, "-readonly", "-json", DATABASE, "-c", statement],
@@ -241,6 +242,25 @@ def severity(level):
 
 # Data shared by all sections, from the tables and views of the database
 build_database()
+
+# Known vulnerabilities, opt-in: the lookup sends the installed package names and versions to OSV.dev
+OSV = os.environ.get("APT_OSV") == "1"
+if OSV:
+    env = {key: value for key, value in os.environ.items() if key not in ("AI_AGENT", "CLAUDECODE")}
+    lookup = subprocess.run([sys.executable, "osv_vulnerabilities.py", DATABASE, "--duckdb", DUCKDB, "--load", LOAD_APT],
+                            capture_output=True, text=True, env=env)
+    if lookup.returncode != 0:
+        raise RuntimeError(f"OSV lookup failed: {lookup.stderr}")
+    vulnerable = query_db("""
+        SELECT v.cve, v.vuln_id, pv.name, pv.version, pv.fixed_version, pv.fix_status, pv.fixed_by_pending_update,
+               v.severity, v.severity_source, v.cvss_score, v.url
+        FROM package_vulnerabilities pv
+        JOIN vulnerabilities v USING (vuln_id)
+    """)
+    if len(vulnerable):
+        vulnerable["key"] = vulnerable["cve"].fillna(vulnerable["vuln_id"])
+        severe = vulnerable["severity"].isin(["critical", "high"])
+        fixable = vulnerable["fix_status"] == "update available"
 packages = query_db("SELECT * FROM packages")
 if packages.empty:
     raise RuntimeError("No installed package found: is this a Debian-based system (or is APT_ROOT correct)?")
@@ -341,6 +361,18 @@ if len(orphans):
 if len(security_upgrades):
     findings.append(("High", "Security updates pending", len(security_upgrades),
                      "Apply them (apt upgrade) and check that unattended-upgrades is active"))
+if OSV and len(vulnerable):
+    if (severe & fixable).any():
+        findings.append(("High", "Critical or high known vulnerabilities with a fix available",
+                         vulnerable[severe & fixable]["key"].nunique(),
+                         "Install the updates fixing them (apt upgrade), starting with the most exposed packages"))
+    if (~severe & fixable).any():
+        findings.append(("Medium", "Other known vulnerabilities with a fix available",
+                         vulnerable[~severe & fixable]["key"].nunique(), "Apply the updates during the next maintenance window"))
+    if (severe & ~fixable).any():
+        findings.append(("Low", "Critical or high known vulnerabilities without a fix yet",
+                         vulnerable[severe & ~fixable]["key"].nunique(),
+                         "Follow the distribution's security tracker; mitigate or remove the most exposed packages"))
 if len(held_with_updates):
     findings.append(("High", "Held packages (apt-mark hold) missing available updates", len(held_with_updates),
                      "Review why each package is held, and release the hold for security fixes"))
@@ -738,6 +770,88 @@ elif universe:
           f"rather than by Canonical. {coverage}")
 else:
     print("*No package from Ubuntu universe.*")
+```
+
+# \faIcon{bug} Known Vulnerabilities
+
+```{python}
+#| echo: false
+#| output: asis
+
+if not OSV:
+    print("*Not checked.* The installed packages can be looked up in [OSV.dev](https://osv.dev), which publishes the "
+          "Debian security tracker and Ubuntu's security notices: render the report with `APT_OSV=1`. This sends the "
+          "names and versions of the installed packages to OSV.dev.\n")
+elif vulnerable.empty:
+    print("\\textcolor{sevok}{\\faIcon{check-circle}} **No known vulnerability** affects the installed versions, "
+          "according to OSV.dev.\n")
+else:
+    pending = vulnerable[fixable & vulnerable["fixed_by_pending_update"].astype(bool)]["key"].nunique()
+    print(f"According to [OSV.dev](https://osv.dev), **{vulnerable['key'].nunique():,} known vulnerabilities** affect "
+          f"**{vulnerable['name'].nunique():,} installed packages**: **{vulnerable[fixable]['key'].nunique():,}** have "
+          f"a fix available ({pending:,} of them in the pending updates), **{vulnerable[~fixable]['key'].nunique():,}** "
+          "have no fix yet. Severities are the distribution's own assessment when it gives one, the CVSS base score "
+          "otherwise. The lookup sent the names and versions of the installed packages to OSV.dev.\n")
+```
+
+```{python}
+#| echo: false
+#| output: asis
+
+if OSV and len(vulnerable):
+    print("**Vulnerabilities per severity and fix status** (from the `vulnerability_posture` view, pivoted):\n")
+    pivot = query_db("""
+        PIVOT (SELECT severity, fix_status, vulnerabilities FROM vulnerability_posture)
+        ON fix_status IN ('update available', 'no fix yet')
+        USING coalesce(sum(vulnerabilities), 0)::INTEGER
+        GROUP BY severity
+        ORDER BY list_position(['critical', 'high', 'medium', 'low', 'negligible', 'none', 'unknown'], severity)
+    """)
+    show(pivot
+         .rename(columns={"severity": "Severity", "update available": "Update available", "no fix yet": "No fix yet"}))
+```
+
+## \faIcon{wrench} Fixes Available
+
+```{python}
+#| echo: false
+#| output: asis
+
+SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "negligible": 4, "none": 5, "unknown": 6}
+if OSV and len(vulnerable) and fixable.any():
+    fixes = (vulnerable[fixable]
+             .assign(rank=lambda d: d["severity"].map(SEVERITY_RANK))
+             .sort_values(["rank", "cvss_score"], ascending=[True, False])
+             .groupby("key", sort=False)
+             .agg(severity=("severity", "first"), score=("cvss_score", "first"),
+                  packages=("name", lambda names: ", ".join(sorted(set(names))[:3]) + (" ..." if len(set(names)) > 3 else "")),
+                  fixed=("fixed_version", "first"), pending=("fixed_by_pending_update", "any"))
+             .head(20).reset_index())
+    print_table(pd.DataFrame({
+        "Vulnerability": fixes["key"],
+        "Severity": fixes["severity"],
+        "CVSS": fixes["score"].map(lambda v: "" if pd.isna(v) else f"{v:.1f}"),
+        "Packages": fixes["packages"].map(lambda t: f"\\nolinkurl{{{t}}}"),
+        "Fixed in": fixes["fixed"].map(lambda t: f"\\nolinkurl{{{t}}}"),
+        "Pending update": fixes["pending"].map({True: "yes", False: ""}),
+    }), widths=[18, 10, 7, 30, 25, 10])
+    if vulnerable[fixable]["key"].nunique() > 20:
+        print(f"The 20 most severe of {vulnerable[fixable]['key'].nunique():,}: the full list is in the "
+              "`package_vulnerabilities` table of the database.\n")
+elif OSV:
+    print("*None: every known vulnerability with a published fix is fixed in the installed versions.*\n")
+```
+
+## \faIcon{box-open} Most Affected Packages
+
+```{python}
+#| echo: false
+#| fig-width: 8
+
+if OSV and len(vulnerable):
+    most = vulnerable.groupby("name")["key"].nunique().sort_values(ascending=False).head(12)
+    hbar(most.index.tolist(), most.values.tolist(), "Installed packages with the most known vulnerabilities",
+         "Known vulnerabilities (fixed or not)")
 ```
 
 # \faIcon{history} Change History

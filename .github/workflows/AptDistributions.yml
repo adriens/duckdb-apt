@@ -126,6 +126,8 @@ jobs:
           DUCKDB: ${{ github.workspace }}/release/duckdb
           APT_EXTENSION: ${{ github.workspace }}/artifact/apt.duckdb_extension
           QUARTO_PYTHON: python3
+          # Public systems (test fixtures, GitHub runner): their packages can be looked up in OSV.dev
+          APT_OSV: '1'
         # Each report comes with the database it was built from (docs/apt_database.sql)
         run: |
           APT_ROOT=${{ github.workspace }}/test/data/debian APT_DATABASE=apt-security-report-sample.duckdb \

@@ -20,6 +20,7 @@ Download them from the latest [apt Distributions workflow run](https://github.co
 | Inventory | Disk usage, third-party software |
 | Software supply chain | Repositories and how they are trusted, risks, package origins, orphaned packages, versions found in no repository |
 | Patch posture | Pending security updates, held packages, repository freshness (`Valid-Until`), community-maintained packages |
+| Known vulnerabilities | With `APT_OSV=1`: vulnerabilities per severity and fix status, the fixes available, the most affected packages |
 | Change history | Recent activity, monthly activity, changes requested by users, failed transactions |
 | Dependency risk | Most depended-on packages, blast radius, dependency network with PageRank and betweenness centrality, what third-party software pulls in |
 | Appendix | How to reproduce it, the database behind it, key queries |
@@ -29,9 +30,9 @@ Download them from the latest [apt Distributions workflow run](https://github.co
 | Severity | Finding |
 | --- | --- |
 | Critical | Repositories with signature checks disabled (`trusted=yes`) |
-| High | Orphaned packages; pending security updates; held packages missing updates; expired repository indexes; package lists not refreshed for over 7 days |
-| Medium | Repositories accepting any key of the global keyring (no `signed-by`); installed versions no repository provides |
-| Low | Non-security updates; plain HTTP repositories; disabled repositories; held packages; failed transactions; Ubuntu universe packages without ESM Apps |
+| High | Critical or high vulnerabilities with a fix available; orphaned packages; pending security updates; held packages missing updates; expired repository indexes; package lists not refreshed for over 7 days |
+| Medium | Other vulnerabilities with a fix available; repositories accepting any key of the global keyring (no `signed-by`); installed versions no repository provides |
+| Low | Critical or high vulnerabilities without a fix yet; non-security updates; plain HTTP repositories; disabled repositories; held packages; failed transactions; Ubuntu universe packages without ESM Apps |
 
 ## Render it
 
@@ -40,6 +41,7 @@ The report needs Quarto, a LaTeX distribution with `xelatex`, [uv](https://docs.
 ```sh
 git clone https://github.com/adriens/duckdb-apt && cd duckdb-apt
 task report                       # docs/apt-security-report.pdf and its database
+APT_OSV=1 task report             # with known vulnerabilities, from OSV.dev
 APT_ROOT=/mnt/image task report   # audit another system
 ```
 

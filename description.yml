@@ -1,5 +1,5 @@
 # Draft of extensions/apt/description.yml for https://github.com/duckdb/community-extensions
-# Before submitting: set repo.ref to the commit to publish, and extension.version accordingly.
+# repo.ref is the commit of the release tag; update it, and extension.version, for each release.
 extension:
   name: apt
   description: Query the apt/dpkg package manager of Debian-based systems with SQL - installed packages, dependencies, repositories and their trust, package origins, pending security updates and change history
@@ -14,7 +14,7 @@ extension:
 
 repo:
   github: adriens/duckdb-apt
-  ref: TO_BE_SET_AT_SUBMISSION
+  ref: 14746b3542d12ab547e5e9720ee48e0b94cddc95  # v0.1.0
 
 docs:
   hello_world: |

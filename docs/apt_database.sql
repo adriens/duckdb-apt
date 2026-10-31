@@ -10,7 +10,10 @@ LOAD apt;
 
 BEGIN TRANSACTION;
 
--- Views first, then the tables referencing others
+-- Views first, then the tables referencing others, starting with the ones of osv_vulnerabilities.py
+DROP VIEW IF EXISTS vulnerability_posture;
+DROP TABLE IF EXISTS package_vulnerabilities;
+DROP TABLE IF EXISTS vulnerabilities;
 DROP VIEW IF EXISTS security_posture;
 DROP VIEW IF EXISTS package_overview;
 DROP VIEW IF EXISTS orphaned_packages;

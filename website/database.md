@@ -118,3 +118,32 @@ WHERE security_update;
 
 FROM monthly_activity ORDER BY month DESC LIMIT 6;
 ```
+
+## Known vulnerabilities
+
+[`docs/osv_vulnerabilities.py`](https://github.com/adriens/duckdb-apt/blob/main/docs/osv_vulnerabilities.py) adds the known vulnerabilities of the installed packages, from [OSV.dev](https://osv.dev), which publishes the Debian security tracker and Ubuntu's security notices:
+
+```sh
+python3 docs/osv_vulnerabilities.py apt.duckdb
+```
+
+| Object | Content |
+| --- | --- |
+| `vulnerabilities` | One row per vulnerability: CVE, severity (the distribution's, or the CVSS 3.x base score), CVSS vector and score, link |
+| `package_vulnerabilities` | One row per installed package and vulnerability not fixed in its installed version: fixing version, `update available` or `no fix yet`, fixed by a pending update or not |
+| `vulnerability_posture` | Vulnerabilities and packages per fix status and severity |
+
+Packages are matched by source package and version; Ubuntu Pro (ESM) fixes count when ESM repositories are enabled.
+
+!!! warning "Privacy"
+    The lookup sends the names and versions of the installed packages to OSV.dev. It never runs implicitly.
+
+```sql
+-- Critical and high vulnerabilities with a fix available
+SELECT v.cve, pv.name, pv.version, pv.fixed_version, v.severity, v.cvss_score
+FROM package_vulnerabilities pv
+JOIN vulnerabilities v USING (vuln_id)
+WHERE pv.fix_status = 'update available'
+  AND v.severity IN ('critical', 'high')
+ORDER BY v.cvss_score DESC;
+```

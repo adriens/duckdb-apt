@@ -101,6 +101,16 @@ duckdb apt.duckdb -cmd "SET VARIABLE apt_root = '/mnt/image'" -c ".read docs/apt
 
 The resulting file holds plain tables: it can be opened, shared or archived without the extension, and re-running the script replaces the snapshot.
 
+### Known vulnerabilities
+
+[docs/osv_vulnerabilities.py](docs/osv_vulnerabilities.py) adds the known vulnerabilities of the installed packages to such a database, from [OSV.dev](https://osv.dev) (the Debian security tracker and Ubuntu's security notices): tables `vulnerabilities` and `package_vulnerabilities` (fix available or not, fixed by a pending update or not) and the view `vulnerability_posture`. It sends the names and versions of the installed packages to OSV.dev, so it is never run implicitly.
+
+```sh
+python3 docs/osv_vulnerabilities.py apt.duckdb
+```
+
+Severities are the distribution's own assessment, or the CVSS 3.x base score when it gives none.
+
 ```sql
 FROM security_posture;
 SELECT name, version, installed_from, available_update FROM package_overview WHERE security_update;
@@ -114,6 +124,7 @@ SELECT table_name, comment FROM duckdb_tables();
 
 ```sh
 task report                       # render docs/apt-security-report.pdf
+APT_OSV=1 task report             # with known vulnerabilities, from OSV.dev
 APT_ROOT=/mnt/image task report   # audit another system
 ```
 
