@@ -11,13 +11,19 @@ extension:
     - adriens
   # apt only exists on Debian-based (glibc) Linux
   excluded_platforms: "wasm_mvp;wasm_eh;wasm_threads;windows_amd64;windows_amd64_mingw;windows_arm64;osx_amd64;osx_arm64;linux_amd64_musl;linux_arm64_musl"
+  # lz4, to read the lz4-compressed apt indexes (vcpkg.json)
+  requires_toolchains: "vcpkg"
 
 repo:
   github: adriens/duckdb-apt
-  ref: 14746b3542d12ab547e5e9720ee48e0b94cddc95  # v0.1.0
+  # v0.1.0; DuckDB 2.0 only, so variegata (v1.5.6 builds) is unset
+  ref: 14746b3542d12ab547e5e9720ee48e0b94cddc95
 
 docs:
   hello_world: |
+    INSTALL apt FROM community;
+    LOAD apt;
+
     -- Version of apt
     SELECT apt_version();
 
@@ -66,5 +72,7 @@ docs:
     Files are read through DuckDB's file system, so enable_external_access and allowed_directories apply.
     Every table function accepts a root parameter to audit another system, such as a mounted disk image or a
     container filesystem. On systems without apt, the functions return no rows.
+
+    Documentation: https://adriens.github.io/duckdb-apt/
 
     A Quarto notebook in the repository turns these tables into a PDF security report.
