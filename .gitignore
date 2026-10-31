@@ -14,3 +14,6 @@ docs/.quarto
 docs/*.pdf
 docs/*.tex
 docs/*_files/
+docs/*.duckdb
+docs/*.duckdb.wal
+site/

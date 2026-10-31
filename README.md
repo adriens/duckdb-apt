@@ -2,6 +2,9 @@
 
 [![Main Extension Distribution Pipeline](https://github.com/adriens/duckdb-apt/actions/workflows/MainDistributionPipeline.yml/badge.svg)](https://github.com/adriens/duckdb-apt/actions/workflows/MainDistributionPipeline.yml)
 [![apt Distributions](https://github.com/adriens/duckdb-apt/actions/workflows/AptDistributions.yml/badge.svg)](https://github.com/adriens/duckdb-apt/actions/workflows/AptDistributions.yml)
+[![Website](https://github.com/adriens/duckdb-apt/actions/workflows/Website.yml/badge.svg)](https://adriens.github.io/duckdb-apt/)
+
+**Documentation: https://adriens.github.io/duckdb-apt/**
 
 This repository is based on https://github.com/duckdb/extension-template, and is the Debian/Ubuntu sibling of [duckdb-brew](https://github.com/adriens/duckdb-brew).
 
@@ -149,7 +152,7 @@ make test
 - `test/sql/apt_sandbox.test` checks that DuckDB's file access restrictions apply.
 - `test/sql/apt.test` runs against the host and only checks invariants. `test/sql/apt_host.test` holds strict checks, enabled with `APT_HOST_TESTS=1` on an apt-based system after `apt-get update`.
 
-The build pipeline runs in a manylinux (RPM-based) container, without dpkg. The [apt Distributions](.github/workflows/AptDistributions.yml) workflow therefore runs the built binaries on Debian 12, Debian 13, Ubuntu 22.04 and Ubuntu 24.04 containers, with the host checks enabled, and compares `apt_upgradable()` with `apt list --upgradable`.
+The build pipeline runs in a manylinux (RPM-based) container, without dpkg. The [apt Distributions](.github/workflows/AptDistributions.yml) workflow therefore runs the built binaries on Debian 12, Debian 13, Ubuntu 22.04, Ubuntu 24.04 and Ubuntu 26.04 containers, with the host checks enabled, and compares `apt_upgradable()` with `apt list --upgradable`.
 
 ## Linting
 CI runs the format and clang-tidy checks of `extension-ci-tools`. To run them locally:

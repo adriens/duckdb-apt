@@ -134,6 +134,39 @@ def query_apt(sql):
     return pd.DataFrame(json.loads(output)) if output else pd.DataFrame()
 
 
+# The report reads the database built by apt_database.sql: the same tables and views can be queried, shared or
+# archived next to the PDF
+DATABASE = os.environ.get("APT_DATABASE", "apt-security-report.duckdb")
+
+
+def build_database():
+    env = {key: value for key, value in os.environ.items() if key != "AI_AGENT"}
+    command = [DUCKDB, "-unsigned", DATABASE, "-cmd", LOAD_APT]
+    if APT_ROOT:
+        command += ["-cmd", f"SET VARIABLE apt_root = '{APT_ROOT}'"]
+    result = subprocess.run(command + ["-c", ".read apt_database.sql"], capture_output=True, text=True, env=env)
+    if result.returncode != 0:
+        raise RuntimeError(f"Could not build {DATABASE}: {result.stderr}")
+
+
+def query_db(sql):
+    env = {key: value for key, value in os.environ.items() if key != "AI_AGENT"}
+
+    def run(statement):
+        result = subprocess.run([DUCKDB, "-readonly", "-json", DATABASE, "-c", statement],
+                                capture_output=True, text=True, env=env)
+        if result.returncode != 0:
+            raise RuntimeError(f"Query failed: {result.stderr}\n{statement}")
+        output = result.stdout.strip()
+        return json.loads(output) if output else []
+
+    rows = run(sql)
+    if rows:
+        return pd.DataFrame(rows)
+    # JSON carries no column names for an empty result: get them from DESCRIBE
+    return pd.DataFrame(columns=[column["column_name"] for column in run(f"DESCRIBE {sql}")])
+
+
 def show(df, empty="*None.*"):
     display(Markdown(df.to_markdown(index=False) if len(df) else empty))
 
@@ -206,99 +239,90 @@ def severity(level):
 #| echo: false
 #| output: false
 
-# Data shared by all sections
-packages = query_apt(f"SELECT * FROM apt_packages({ROOT})")
+# Data shared by all sections, from the tables and views of the database
+build_database()
+packages = query_db("SELECT * FROM packages")
 if packages.empty:
     raise RuntimeError("No installed package found: is this a Debian-based system (or is APT_ROOT correct)?")
+posture = query_db("SELECT * FROM security_posture").iloc[0]
 
-sources = query_apt(f"""
+sources = query_db("""
     SELECT regexp_extract(file, '[^/]+$') AS file, enabled, type, uri, suite, components, signed_by, trusted
-    FROM apt_sources({ROOT})
+    FROM sources
     ORDER BY file, suite, type
 """)
 enabled_sources = sources[sources["enabled"]] if len(sources) else sources
 
-orphans = query_apt(f"""
-    SELECT p.name, p.version, regexp_replace(p.maintainer, '\\s*<.*>', '') AS vendor,
-           round(p.installed_size_kb / 1024.0, 1) AS size_mb
-    FROM apt_packages({ROOT}) p
-    ANTI JOIN apt_package_origins({ROOT}) o USING (name, architecture)
+orphans = query_db("""
+    SELECT name, version, regexp_replace(maintainer, '\\s*<.*>', '') AS vendor,
+           round(installed_size_kb / 1024.0, 1) AS size_mb
+    FROM orphaned_packages
     ORDER BY size_mb DESC
 """)
 
-not_in_repo = query_apt(f"""
-    SELECT p.name, p.version AS installed_version,
-           string_agg(DISTINCT o.available_version, ', ') AS available_versions
-    FROM apt_packages({ROOT}) p
-    JOIN apt_package_origins({ROOT}) o USING (name, architecture)
-    GROUP BY ALL
-    HAVING NOT bool_or(o.is_installed_version)
-    ORDER BY p.name
+not_in_repo = query_db("""
+    SELECT name, installed_version, array_to_string(available_versions, ', ') AS available_versions
+    FROM packages_not_in_repositories
+    ORDER BY name
 """)
 
-repositories = query_apt(f"""
-    SELECT coalesce(label, origin, site) AS repository, coalesce(suite, '') AS suite,
-           coalesce(component, '') AS component, count(DISTINCT name) AS packages
-    FROM apt_package_origins({ROOT})
-    WHERE is_installed_version
-    GROUP BY ALL
+repositories = query_db("""
+    SELECT coalesce(r.label, r.origin, r.site) AS repository, coalesce(r.suite, '') AS suite,
+           coalesce(r.component, '') AS component, u.installed_packages_published AS packages
+    FROM repository_usage u
+    JOIN repositories r USING (repository_id)
+    WHERE u.installed_packages_published > 0
     ORDER BY packages DESC
 """)
 
-universe = query_apt(f"""
-    SELECT count(DISTINCT name) AS packages
-    FROM apt_package_origins({ROOT})
-    WHERE is_installed_version AND origin = 'Ubuntu' AND component = 'universe'
+universe = query_db("""
+    SELECT count(DISTINCT o.name) AS packages
+    FROM package_origins o
+    JOIN repositories r USING (repository_id)
+    WHERE o.is_installed_version AND r.origin = 'Ubuntu' AND r.component = 'universe'
 """)["packages"][0]
 esm_apps = bool(len(enabled_sources)) and enabled_sources["uri"].str.contains("esm.ubuntu.com/apps").any()
 
-upgradable = query_apt(f"""
+upgradable = query_db("""
     SELECT u.*, p.held
-    FROM apt_upgradable({ROOT}) u JOIN apt_packages({ROOT}) p USING (name, architecture)
+    FROM upgrades u
+    JOIN packages p USING (name, architecture)
     ORDER BY name
 """)
 if upgradable.empty:
     upgradable = pd.DataFrame(columns=["name", "architecture", "current_version", "new_version", "repository",
                                        "is_security", "held"])
-security_upgrades = upgradable[upgradable["is_security"].astype(bool)]
+security_upgrades = query_db("SELECT * FROM security_updates ORDER BY name")
 held = packages[packages["held"]]
-held_with_updates = upgradable[upgradable["held"].astype(bool)]
+held_with_updates = query_db("SELECT * FROM held_packages WHERE missed_version IS NOT NULL")
 
+apt_repositories = query_db("SELECT * FROM repositories ORDER BY site, suite")
 # Indexes past their Valid-Until date: apt refuses to refresh them, so the system is stuck with old metadata
 # (a broken or frozen mirror, or an attacker replaying old metadata to hide updates)
-apt_repositories = query_apt(f"SELECT * FROM apt_repositories({ROOT}) ORDER BY site, suite")
-expired = query_apt(f"""
-    SELECT site, suite, valid_until
-    FROM apt_repositories({ROOT})
-    WHERE valid_until < now()::TIMESTAMP
-    ORDER BY valid_until
+expired = query_db("SELECT site, suite, valid_until FROM expired_repositories ORDER BY valid_until")
+
+history = query_db("SELECT * FROM history ORDER BY start_time")
+recent = query_db("SELECT * FROM recent_changes ORDER BY start_time")
+for frame in (history, recent):
+    if len(frame):
+        frame["start_time"] = pd.to_datetime(frame["start_time"])
+failed = query_db("""
+    SELECT *
+    FROM failed_transactions
+    WHERE start_time >= (SELECT max(start_time) FROM history) - INTERVAL 30 DAY
+    ORDER BY start_time
 """)
 
-# History, over the 30 days before its last entry
-history = query_apt(f"SELECT * FROM apt_history({ROOT}) ORDER BY start_time")
-if len(history):
-    history["start_time"] = pd.to_datetime(history["start_time"])
-    recent = history[history["start_time"] > history["start_time"].max() - pd.Timedelta(days=30)]
-else:
-    recent = history
-failed = recent[recent["error"].notna()] if len(recent) else recent
+third_party = query_db("""
+    SELECT name, version, regexp_replace(maintainer, '\\s*<.*>', '') AS vendor
+    FROM third_party_packages
+    ORDER BY name
+""")
 
 release_files = glob.glob(f"{APT_ROOT}/var/lib/apt/lists/*Release")
 last_update = datetime.fromtimestamp(max(os.path.getmtime(f) for f in release_files)) if release_files else None
 days_since_update = (datetime.now() - last_update).days if last_update else None
 
-# Third-party: installed on purpose, and not published by Ubuntu or Debian (in any version)
-third_party = query_apt(f"""
-    SELECT p.name, p.version, regexp_replace(p.maintainer, '\\s*<.*>', '') AS vendor
-    FROM apt_packages({ROOT}) p
-    WHERE NOT p.auto_installed
-      AND NOT EXISTS (
-          SELECT 1 FROM apt_package_origins({ROOT}) o
-          WHERE o.name = p.name AND o.architecture = p.architecture
-            AND (o.origin ILIKE '%ubuntu%' OR o.origin ILIKE '%debian%')
-      )
-    ORDER BY p.name
-""")
 
 # Findings: (severity, finding, count, recommendation)
 trusted_sources = enabled_sources[enabled_sources["trusted"]] if len(sources) else sources
@@ -344,7 +368,7 @@ if len(held) > len(held_with_updates):
     findings.append(("Low", "Held packages (apt-mark hold)", len(held) - len(held_with_updates),
                      "Document why they are held: they will silently miss future updates"))
 if len(failed):
-    findings.append(("Low", "Failed apt transactions in the last 30 days of history", failed["start_time"].nunique(),
+    findings.append(("Low", "Failed apt transactions in the last 30 days of history", len(failed),
                      "Check that the packages involved are in a consistent state (dpkg --audit)"))
 if universe and not esm_apps:
     findings.append(("Low", "Packages from Ubuntu universe (community maintained)", int(universe),
@@ -393,17 +417,24 @@ else:
 #| output: asis
 
 print("## Key Figures\n")
-manual = int((~packages["auto_installed"]).sum())
+print("From the `security_posture` view of the database built for this report.\n")
+installed, manual = int(posture["installed_packages"]), int(posture["installed_on_purpose"])
 kpis = pd.DataFrame([
-    ("Installed packages", f"{len(packages):,}"),
-    ("Installed on purpose / as dependencies", f"{manual:,} / {len(packages) - manual:,}"),
+    ("Installed packages", f"{installed:,}"),
+    ("Installed on purpose / as dependencies", f"{manual:,} / {installed - manual:,}"),
     ("Disk space used", f"{packages['installed_size_kb'].sum() / 1024 / 1024:,.1f} GB"),
-    ("Third-party packages installed on purpose", f"{len(third_party):,}"),
+    ("Third-party packages installed on purpose", f"{int(posture['third_party_packages']):,}"),
     ("Enabled repositories (type x URI x suite)", f"{len(enabled_sources):,}"),
-    ("Packages apt never updates (orphaned)", f"{len(orphans):,}"),
-    ("Pending updates (of which security)", f"{len(upgradable):,} ({len(security_upgrades):,})"),
-    ("Held packages", f"{len(held):,}"),
+    ("Risky repository settings", f"{int(posture['risky_sources']):,}"),
+    ("Packages apt never updates (orphaned)", f"{int(posture['orphaned_packages']):,}"),
+    ("Installed versions no repository publishes", f"{int(posture['versions_not_in_repositories']):,}"),
+    ("Pending updates (of which security)",
+     f"{int(posture['pending_updates']):,} ({int(posture['pending_security_updates']):,})"),
+    ("Held packages", f"{int(posture['held_packages']):,}"),
+    ("Expired repository indexes", f"{int(posture['expired_repositories']):,}"),
+    ("Unsatisfied dependencies", f"{int(posture['unsatisfied_dependencies']):,}"),
     ("Last package list refresh", f"{last_update:%Y-%m-%d %H:%M} ({days_since_update} days ago)" if last_update else "never"),
+    ("Last package change", str(posture["last_package_change"] or "none")),
 ], columns=["Indicator", "Value"])
 print(kpis.to_markdown(index=False))
 ```
@@ -425,7 +456,7 @@ Repositories, origins and pending updates are only as fresh as the last `apt upd
 #| echo: false
 #| output: asis
 
-version = query_apt(f"SELECT apt_version('{APT_ROOT or '/'}') AS version")["version"][0]
+version = query_db("SELECT apt_version FROM snapshot")["apt_version"][0]
 facts = pd.DataFrame([
     ("Host", HOST),
     ("Operating system", system),
@@ -736,6 +767,22 @@ if len(recent):
          "Package changes")
 ```
 
+## \faIcon{calendar-alt} Monthly Activity
+
+The last 12 months with activity, from the `monthly_activity` view (a `PIVOT` with one column per apt action):
+
+```{python}
+#| echo: false
+#| output: asis
+
+monthly = query_db("SELECT * FROM monthly_activity ORDER BY month DESC LIMIT 12")
+if len(monthly):
+    monthly["month"] = pd.to_datetime(monthly["month"]).dt.strftime("%Y-%m")
+    show(monthly.rename(columns=str.capitalize))
+else:
+    print("*No history.*")
+```
+
 ## \faIcon{user-check} Changes Requested by Users
 
 Software installed or removed by hand bypasses the automatic update policy: each change should be traceable to a need.
@@ -763,7 +810,7 @@ if len(recent):
 
 if len(failed):
     print("**Failed transactions** (they can leave packages half-configured):\n")
-    show(failed.drop_duplicates("start_time")[["start_time", "commandline", "error"]]
+    show(failed[["start_time", "commandline", "error"]]
          .rename(columns={"start_time": "Date", "commandline": "Command", "error": "Error"}))
 ```
 
@@ -775,18 +822,11 @@ A package many others depend on is a high-value target: a vulnerability or a com
 #| echo: false
 #| output: false
 
-edges = query_apt(f"""
-    WITH deps AS (
-        SELECT DISTINCT package, dependency
-        FROM apt_dependencies({ROOT})
-        WHERE relation IN ('Pre-Depends', 'Depends')
-    ),
-    installed AS (SELECT DISTINCT name FROM apt_packages({ROOT}))
-    SELECT DISTINCT d.package, coalesce(i.name, v.package) AS dependency
-    FROM deps d
-    LEFT JOIN installed i ON i.name = d.dependency
-    LEFT JOIN apt_provides({ROOT}) v ON i.name IS NULL AND v.provides = d.dependency
-    WHERE coalesce(i.name, v.package) IS NOT NULL AND d.package <> coalesce(i.name, v.package)
+# Hard dependencies between installed packages, virtual packages resolved to their providers
+edges = query_db("""
+    SELECT DISTINCT package, depends_on AS dependency
+    FROM dependency_edges
+    WHERE relation IN ('Pre-Depends', 'Depends') AND package <> depends_on
 """)
 graph = nx.DiGraph()
 graph.add_nodes_from(packages["name"])
@@ -972,6 +1012,34 @@ task report
 
 # Audit another system, e.g. a mounted disk image
 APT_ROOT=/mnt/image task report
+```
+
+## \faIcon{table} The Database Behind This Report
+
+Every figure of this report is read from a DuckDB database built by [docs/apt_database.sql](https://github.com/adriens/duckdb-apt/blob/main/docs/apt_database.sql), saved next to this PDF. It holds plain tables, so it can be opened without the extension, queried, shared or archived to compare snapshots over time:
+
+```{python}
+#| echo: false
+#| output: asis
+
+objects = query_db("""
+    SELECT 'table' AS kind, table_name AS name, comment, estimated_size AS rows FROM duckdb_tables()
+    UNION ALL
+    SELECT 'view', view_name, comment, NULL FROM duckdb_views() WHERE NOT internal
+    ORDER BY kind, name
+""")
+print_table(pd.DataFrame({
+    "Object": objects.apply(lambda r: f"\\texttt{{{r['name'].replace('_', chr(92) + '_')}}} ({r['kind']})", axis=1),
+    "Description": objects["comment"].fillna(""),
+}), widths=[38, 62])
+```
+
+```sql
+-- Open it with any DuckDB client
+FROM security_posture;
+SELECT name, version, installed_from, available_update
+FROM package_overview
+WHERE security_update;
 ```
 
 ## \faIcon{database} Key Queries

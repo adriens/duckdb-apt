@@ -24,7 +24,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: ['debian:12', 'debian:13', 'ubuntu:22.04', 'ubuntu:24.04']
+        image: ['debian:12', 'debian:13', 'ubuntu:22.04', 'ubuntu:24.04', 'ubuntu:26.04']
     steps:
       - name: Refresh package lists
         run: apt-get update && apt-get install -y --no-install-recommends ca-certificates git
@@ -78,7 +78,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          apt list --upgradable 2>/dev/null | grep upgradable | cut -d/ -f1 | sort -u > apt.txt
+          # grep fails when nothing is upgradable: an empty list is a valid answer
+          apt list --upgradable 2>/dev/null | { grep upgradable || true; } | cut -d/ -f1 | sort -u > apt.txt
           release/duckdb -unsigned -noheader -list \
             -c "LOAD 'artifact/apt.duckdb_extension'; SELECT DISTINCT name FROM apt_upgradable() ORDER BY name" \
             | sort -u > extension.txt
@@ -125,16 +126,20 @@ jobs:
           DUCKDB: ${{ github.workspace }}/release/duckdb
           APT_EXTENSION: ${{ github.workspace }}/artifact/apt.duckdb_extension
           QUARTO_PYTHON: python3
+        # Each report comes with the database it was built from (docs/apt_database.sql)
         run: |
-          APT_ROOT=${{ github.workspace }}/test/data/debian quarto render apt-security-report.qmd --to pdf
+          APT_ROOT=${{ github.workspace }}/test/data/debian APT_DATABASE=apt-security-report-sample.duckdb \
+            quarto render apt-security-report.qmd --to pdf
           mv apt-security-report.pdf apt-security-report-sample.pdf
-          quarto render apt-security-report.qmd --to pdf
+          APT_DATABASE=apt-security-report-github-runner.duckdb quarto render apt-security-report.qmd --to pdf
           mv apt-security-report.pdf apt-security-report-github-runner.pdf
 
       - uses: actions/upload-artifact@v4
         with:
           name: apt-security-reports
-          path: docs/apt-security-report-*.pdf
+          path: |
+            docs/apt-security-report-*.pdf
+            docs/apt-security-report-*.duckdb
 
       - name: Attach the reports to the release
         if: github.event.workflow_run.event == 'push' && startsWith(github.event.workflow_run.head_branch, 'v')
@@ -143,4 +148,4 @@ jobs:
           TAG: ${{ github.event.workflow_run.head_branch }}
         run: |
           gh release view "$TAG" > /dev/null 2>&1 || gh release create "$TAG" --verify-tag --generate-notes
-          gh release upload "$TAG" docs/apt-security-report-*.pdf --clobber
+          gh release upload "$TAG" docs/apt-security-report-*.pdf docs/apt-security-report-*.duckdb --clobber
