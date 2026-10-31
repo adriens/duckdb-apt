@@ -1,5 +1,7 @@
 {
-    "dependencies": [],
+    "dependencies": [
+        "lz4"
+    ],
     "vcpkg-configuration": {
         "overlay-ports": [
             "./extension-ci-tools/vcpkg_ports"

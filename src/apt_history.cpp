@@ -82,8 +82,7 @@ static void ParseHistoryPackages(const string &action, const string &field, cons
 }
 
 static void ReadHistoryFile(FileSystem &fs, const string &path, vector<AptHistoryEntry> &out) {
-	auto compression =
-	    StringUtil::EndsWith(path, ".gz") ? FileCompressionType::GZIP : FileCompressionType::UNCOMPRESSED;
+	auto compression = StringUtil::EndsWith(path, ".gz") ? AptCompression::GZIP : AptCompression::NONE;
 	static const char *ACTIONS[] = {"Install", "Reinstall", "Upgrade", "Downgrade", "Remove", "Purge"};
 	for (auto &stanza : ReadStanzas(fs, path, compression)) {
 		AptHistoryEntry transaction;

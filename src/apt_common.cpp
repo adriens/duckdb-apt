@@ -5,14 +5,83 @@
 #include "duckdb/parser/parsed_data/create_table_function_info.hpp"
 
 #include <algorithm>
+#include <lz4frame.h>
 
 namespace duckdb {
 
 static constexpr idx_t READ_CHUNK_SIZE = 1 << 20;
 
-AptLineReader::AptLineReader(FileSystem &fs_p, const string &path, const FileCompressionType &compression) : fs(fs_p) {
+static FileCompressionType ToFileCompression(AptCompression compression) {
+	switch (compression) {
+	case AptCompression::GZIP:
+		return FileCompressionType::GZIP;
+	case AptCompression::ZSTD:
+		return FileCompressionType::ZSTD;
+	default:
+		// lz4 files are read raw and decompressed by the reader
+		return FileCompressionType::UNCOMPRESSED;
+	}
+}
+
+AptLineReader::AptLineReader(FileSystem &fs_p, const string &path_p, AptCompression compression)
+    : fs(fs_p), path(path_p) {
 	handle = fs.OpenFile(path, FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_NULL_IF_NOT_EXISTS |
-	                               FileOpenFlags(compression));
+	                               FileOpenFlags(ToFileCompression(compression)));
+	if (handle && compression == AptCompression::LZ4) {
+		LZ4F_dctx *context = nullptr;
+		if (LZ4F_isError(LZ4F_createDecompressionContext(&context, LZ4F_VERSION))) {
+			throw IOException("Could not create an lz4 decompression context for \"%s\"", path);
+		}
+		lz4_context = context;
+	}
+}
+
+AptLineReader::~AptLineReader() {
+	if (lz4_context) {
+		LZ4F_freeDecompressionContext(static_cast<LZ4F_dctx *>(lz4_context));
+	}
+}
+
+void AptLineReader::Refill() {
+	if (lz4_context) {
+		RefillLz4();
+		return;
+	}
+	auto filled = buffer.size();
+	buffer.resize(filled + READ_CHUNK_SIZE);
+	auto read = handle->Read(&buffer[filled], READ_CHUNK_SIZE);
+	buffer.resize(filled + NumericCast<idx_t>(read));
+	end_of_file = read == 0;
+}
+
+// Streams the lz4 frames of the file: decompress what was read, and read more once it is consumed
+void AptLineReader::RefillLz4() {
+	while (true) {
+		if (lz4_input_position >= lz4_input.size()) {
+			lz4_input.resize(READ_CHUNK_SIZE);
+			auto read = handle->Read(&lz4_input[0], READ_CHUNK_SIZE);
+			lz4_input.resize(NumericCast<idx_t>(read));
+			lz4_input_position = 0;
+			if (read == 0) {
+				end_of_file = true;
+				return;
+			}
+		}
+		auto filled = buffer.size();
+		buffer.resize(filled + READ_CHUNK_SIZE);
+		size_t output_size = READ_CHUNK_SIZE;
+		size_t input_size = lz4_input.size() - lz4_input_position;
+		auto status = LZ4F_decompress(static_cast<LZ4F_dctx *>(lz4_context), &buffer[filled], &output_size,
+		                              &lz4_input[lz4_input_position], &input_size, nullptr);
+		if (LZ4F_isError(status)) {
+			throw IOException("Could not decompress \"%s\": %s", path, LZ4F_getErrorName(status));
+		}
+		lz4_input_position += input_size;
+		buffer.resize(filled + output_size);
+		if (output_size > 0) {
+			return;
+		}
+	}
 }
 
 bool AptLineReader::ReadLine(string &line) {
@@ -35,11 +104,7 @@ bool AptLineReader::ReadLine(string &line) {
 		}
 		buffer.erase(0, position);
 		position = 0;
-		auto filled = buffer.size();
-		buffer.resize(filled + READ_CHUNK_SIZE);
-		auto read = handle->Read(&buffer[filled], READ_CHUNK_SIZE);
-		buffer.resize(filled + NumericCast<idx_t>(read));
-		end_of_file = read == 0;
+		Refill();
 	}
 }
 
@@ -48,7 +113,7 @@ timestamp_t AptLineReader::LastModifiedTime() {
 	return fs.GetLastModifiedTime(*handle);
 }
 
-vector<AptStanza> ReadStanzas(FileSystem &fs, const string &path, const FileCompressionType &compression) {
+vector<AptStanza> ReadStanzas(FileSystem &fs, const string &path, AptCompression compression) {
 	vector<AptStanza> stanzas;
 	AptLineReader reader(fs, path, compression);
 	AptStanza current;

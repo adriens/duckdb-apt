@@ -20,12 +20,18 @@ constexpr const char *APT_LOG_DIR = "/var/log/apt";
 constexpr const char *OS_RELEASE_PATH = "/etc/os-release";
 constexpr const char *OS_RELEASE_FALLBACK_PATH = "/usr/lib/os-release";
 
+//! Compressions apt uses for the files it stores. gzip and zstd are decompressed by DuckDB's file system, lz4
+//! (the default of apt's index files on Debian and Ubuntu containers) by the extension.
+enum class AptCompression : uint8_t { NONE, GZIP, ZSTD, LZ4 };
+
 //! Reads a text file line by line through DuckDB's file system, so that enable_external_access and
 //! allowed_directories apply. A missing file reads as empty.
 class AptLineReader {
 public:
-	AptLineReader(FileSystem &fs, const string &path,
-	              const FileCompressionType &compression = FileCompressionType::UNCOMPRESSED);
+	AptLineReader(FileSystem &fs, const string &path, AptCompression compression = AptCompression::NONE);
+	~AptLineReader();
+	AptLineReader(const AptLineReader &) = delete;
+	AptLineReader &operator=(const AptLineReader &) = delete;
 
 	bool Exists() const {
 		return handle != nullptr;
@@ -35,11 +41,20 @@ public:
 	timestamp_t LastModifiedTime();
 
 private:
+	//! Appends the next decompressed bytes to the buffer, sets end_of_file when there are none
+	void Refill();
+	void RefillLz4();
+
 	FileSystem &fs;
+	string path;
 	unique_ptr<FileHandle> handle;
 	string buffer;
 	idx_t position = 0;
 	bool end_of_file = false;
+	//! LZ4F_dctx, when reading an lz4 file
+	void *lz4_context = nullptr;
+	string lz4_input;
+	idx_t lz4_input_position = 0;
 };
 
 //! A deb822 stanza (dpkg status, extended_states, Release, deb822 sources), keyed by field name
@@ -47,8 +62,7 @@ using AptStanza = std::unordered_map<string, string>;
 
 //! Parses a deb822 file. Continuation lines are appended to their field, except for Description where only
 //! the synopsis is kept. Lines starting with "#" are comments.
-vector<AptStanza> ReadStanzas(FileSystem &fs, const string &path,
-                              const FileCompressionType &compression = FileCompressionType::UNCOMPRESSED);
+vector<AptStanza> ReadStanzas(FileSystem &fs, const string &path, AptCompression compression = AptCompression::NONE);
 string GetField(const AptStanza &stanza, const string &key);
 
 //! Empty strings and lists become NULL

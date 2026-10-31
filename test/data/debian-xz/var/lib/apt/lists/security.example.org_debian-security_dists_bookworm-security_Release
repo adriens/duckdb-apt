@@ -1,0 +1,5 @@
+Origin: Debian
+Label: Debian-Security
+Suite: stable-security
+Codename: bookworm-security
+Date: Sat, 10 Feb 2024 12:00:00 UTC

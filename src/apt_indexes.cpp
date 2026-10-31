@@ -117,7 +117,7 @@ static AptRepository ResolveRepository(FileSystem &fs, const string &lists_dir, 
 }
 
 // The compression of an index file, or false if the file is not a Packages index
-static bool GetIndexCompression(const string &name, string &base, FileCompressionType &compression) {
+static bool GetIndexCompression(const string &name, string &base, AptCompression &compression) {
 	auto packages = name.rfind("_Packages");
 	if (packages == string::npos) {
 		return false;
@@ -125,16 +125,18 @@ static bool GetIndexCompression(const string &name, string &base, FileCompressio
 	base = name.substr(0, packages);
 	auto extension = name.substr(packages + string("_Packages").size());
 	if (extension.empty()) {
-		compression = FileCompressionType::UNCOMPRESSED;
+		compression = AptCompression::NONE;
 	} else if (extension == ".gz") {
-		compression = FileCompressionType::GZIP;
+		compression = AptCompression::GZIP;
 	} else if (extension == ".zst") {
-		compression = FileCompressionType::ZSTD;
+		compression = AptCompression::ZSTD;
+	} else if (extension == ".lz4") {
+		compression = AptCompression::LZ4;
 	} else if (extension[0] == '.' && extension.find('_') == string::npos) {
 		// Skipping it would report its packages as provided by no repository: fail instead
 		throw NotImplementedException(
-		    "Repository index \"%s\" is compressed with \"%s\", which is not supported (only gzip and zstd are): "
-		    "set Acquire::GzipIndexes \"true\" in the apt configuration, or store indexes uncompressed",
+		    "Repository index \"%s\" is compressed with \"%s\", which is not supported (only gzip, zstd and lz4 "
+		    "are): set Acquire::CompressionTypes::Order to one of them in the apt configuration",
 		    name, extension.substr(1));
 	} else {
 		return false;
@@ -152,7 +154,7 @@ AptIndexes ReadIndexes(FileSystem &fs, const string &root, const std::unordered_
 
 	for (auto &index_name : ListDirectory(fs, lists_dir)) {
 		string base;
-		FileCompressionType compression;
+		AptCompression compression;
 		if (!GetIndexCompression(index_name, base, compression)) {
 			continue;
 		}

@@ -186,16 +186,29 @@ SELECT apt_version('test/data/debian'), apt_version('test/data/debian/'), apt_ve
 ----
 2.6.1	2.6.1	NULL
 
-# Compressed indexes that cannot be read must not silently report packages as orphaned
-statement error
-SELECT * FROM apt_package_origins(root := 'test/data/debian-lz4');
+# lz4 indexes (the default of apt on Debian and Ubuntu containers) are streamed: test/data/debian-lz4 has
+# 20,001 packages in 64 KiB linked lz4 blocks, the installed curl and its update at the very end
+query III
+SELECT site, suite, packages FROM apt_repositories(root := 'test/data/debian-lz4');
 ----
-<REGEX>:.*compressed with "lz4", which is not supported.*
+security.example.org/debian-security	stable-security	20001
 
-statement error
+
+query IIIIII
 SELECT * FROM apt_upgradable(root := 'test/data/debian-lz4');
 ----
-<REGEX>:.*compressed with "lz4".*
+curl	amd64	7.88.1-10+deb12u5	7.88.1-10+deb12u6	stable-security	true
+
+# Compressed indexes that cannot be read must not silently report packages as orphaned
+statement error
+SELECT * FROM apt_package_origins(root := 'test/data/debian-xz');
+----
+<REGEX>:.*compressed with "xz", which is not supported.*
+
+statement error
+SELECT * FROM apt_upgradable(root := 'test/data/debian-xz');
+----
+<REGEX>:.*compressed with "xz".*
 
 statement error
 SELECT * FROM apt_packages(root := 'test/data/debian', unknown := 1);

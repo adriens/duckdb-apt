@@ -58,6 +58,22 @@ jobs:
           APT_HOST_TESTS=1 release/test/unittest --test-dir . "test/*" 2>&1 | tee unittest.log
           if grep -qi "skipped" unittest.log; then echo "Some tests were skipped"; exit 1; fi
 
+      - name: Build the database of docs/apt_database.sql
+        shell: bash
+        run: |
+          set -euo pipefail
+          release/duckdb -unsigned apt.duckdb -cmd "LOAD 'artifact/apt.duckdb_extension'" -c ".read docs/apt_database.sql"
+          release/duckdb apt.duckdb -c "SELECT count(*) FROM orphaned_packages; SELECT count(*) FROM security_updates;"
+          # Every table, view and column is documented
+          release/duckdb apt.duckdb -c "
+            SELECT CASE WHEN count(*) > 0 THEN error('Undocumented: ' || string_agg(name, ', ')) END
+            FROM (
+                SELECT table_name AS name FROM duckdb_tables() WHERE comment IS NULL
+                UNION ALL SELECT view_name FROM duckdb_views() WHERE NOT internal AND comment IS NULL
+                UNION ALL SELECT table_name || '.' || column_name FROM duckdb_columns()
+                WHERE NOT internal AND comment IS NULL AND table_name IN (SELECT table_name FROM duckdb_tables())
+            )"
+
       - name: Compare apt_upgradable() with apt
         shell: bash
         run: |
