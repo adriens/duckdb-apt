@@ -40,17 +40,32 @@ jobs:
           run-id: ${{ github.event.workflow_run.id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      # The test bundle holds a duckdb shell and the unittest runner with the extension built in
+      # The test bundle holds a duckdb shell and the unittest runner, built without the extension. The runner's
+      # "require apt" loads it from the extension repository of the build directory compiled into the runner.
       - name: Extract the test bundle
-        run: tar xzf artifact/test-support/*/test-support.tar.gz
+        shell: bash
+        run: |
+          tar xzf artifact/test-support/*/test-support.tar.gz
+          repository=/duckdb_build_dir/build/release/repository/v2.0.0/linux_amd64
+          mkdir -p $repository
+          cp artifact/apt.duckdb_extension $repository/
 
+      # A skipped test would mean the extension was not loaded: fail instead of passing vacuously
       - name: Run the SQL tests, including the host checks
-        run: APT_HOST_TESTS=1 release/test/unittest --test-dir . "test/*"
+        shell: bash
+        run: |
+          set -o pipefail
+          APT_HOST_TESTS=1 release/test/unittest --test-dir . "test/*" 2>&1 | tee unittest.log
+          if grep -qi "skipped" unittest.log; then echo "Some tests were skipped"; exit 1; fi
 
       - name: Compare apt_upgradable() with apt
+        shell: bash
         run: |
+          set -euo pipefail
           apt list --upgradable 2>/dev/null | grep upgradable | cut -d/ -f1 | sort -u > apt.txt
-          release/duckdb -noheader -list -c "SELECT DISTINCT name FROM apt_upgradable() ORDER BY name" | sort -u > extension.txt
+          release/duckdb -unsigned -noheader -list \
+            -c "LOAD 'artifact/apt.duckdb_extension'; SELECT DISTINCT name FROM apt_upgradable() ORDER BY name" \
+            | sort -u > extension.txt
           echo "apt: $(wc -l < apt.txt) upgradable packages, extension: $(wc -l < extension.txt)"
           diff apt.txt extension.txt
 
